@@ -424,7 +424,7 @@ button:not(:where([class*='group/button'])) { color:inherit; }
 /* 에이전트 상태 점 — running/failed 는 부드럽게 깜빡임 */
 .chat-agent>.presence{flex:0 0 auto;width:8px;height:8px;border-radius:50%;background:transparent;border:1.5px solid var(--c-text-muted);opacity:.7}
 .chat-agent>.presence.done{background:var(--c-success);border-color:var(--c-success);opacity:1}
-.chat-agent>.presence.complete{width:12px;height:12px;border:0;opacity:1;background:var(--c-success);color:var(--c-on-inverse);display:grid;place-items:center}
+.chat-agent>.presence.complete{width:12px;height:12px;border:0;border-radius:0;opacity:1;background:transparent;color:var(--c-success);display:grid;place-items:center}
 .chat-agent>.presence.running{background:var(--c-success);border-color:var(--c-success);opacity:1;box-shadow:0 0 0 0 var(--c-success);animation:presence-pulse 1.8s ease-in-out infinite}
 .chat-agent>.presence.failed{background:#e5484d;border-color:#e5484d;opacity:1;box-shadow:0 0 0 0 #e5484d;animation:presence-pulse 1.4s ease-in-out infinite}
 @keyframes presence-pulse{0%{opacity:1;box-shadow:0 0 0 0 currentColor}50%{opacity:.45;box-shadow:0 0 0 4px transparent}100%{opacity:1;box-shadow:0 0 0 0 transparent}}

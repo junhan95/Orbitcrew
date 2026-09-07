@@ -1915,7 +1915,7 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
                 const presence = agent.isManager
                   ? managerPresence(boardTasks, sending && selectedAgentId === agent.id, background.length > 0)
                   : agentPresence(agent.name, boardTasks, background.some((item) => item.agent === agent.name));
-                return <i className={`presence ${presence}`} title={t(PRESENCE_LABEL[presence])} aria-label={tf('{0} 상태: {1}', agent.name, t(PRESENCE_LABEL[presence]))}>{presence === 'complete' && <Check size={9} strokeWidth={3} aria-hidden="true" />}</i>;
+                return <i className={`presence ${presence}`} title={t(PRESENCE_LABEL[presence])} aria-label={tf('{0} 상태: {1}', agent.name, t(PRESENCE_LABEL[presence]))}>{presence === 'complete' && <Check size={12} strokeWidth={3} aria-hidden="true" />}</i>;
               })()}<span style={{ background: agent.color }}>{agent.isManager ? <Bot size={17} aria-hidden="true" /> : agent.name[0]}</span><div><b>{agent.name}</b><small>{t(agent.role)}</small></div></button>)}
       <strong className="chat-tasks-title">{t("이 프로젝트의 업무")}<em>{boardTasks.length}</em></strong>
       <div className="chat-tasks">
