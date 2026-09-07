@@ -34,6 +34,7 @@
     "docx": "^9.7.1",
     "drizzle-orm": "^0.45.2",
     "embla-carousel-react": "8.5.2",
+    "html2pdf.js": "^0.14.0",
     "input-otp": "1.4.2",
     "lucide-react": "1.31.0",
     "pptxgenjs": "^4.0.1",

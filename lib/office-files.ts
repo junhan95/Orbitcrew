@@ -7,11 +7,12 @@
  *   .docx ← HTML 전체 문서 (h1~h3 · p · ul/ol · table · b/i/br)
  *   .xlsx ← CSV (여러 시트는 `## 시트: 이름` 줄로 구분)
  *   .pptx ← 마크다운 슬라이드 (`---` 로 슬라이드 구분, `# 제목`, `- 불릿`, 그 외 줄은 본문)
+ *   .pdf  ← 인쇄용 HTML (A4 세로, 페이지 나눔은 `<div style="page-break-after:always">`) — 브라우저가 렌더링해 실제 PDF 로
  *
- * 변환 라이브러리(docx · xlsx · pptxgenjs)는 필요할 때만 동적으로 불러옵니다.
+ * 변환 라이브러리(docx · xlsx · pptxgenjs · html2pdf.js)는 필요할 때만 동적으로 불러옵니다.
  */
 
-export const OFFICE_EXTENSIONS = ['docx', 'xlsx', 'pptx'] as const;
+export const OFFICE_EXTENSIONS = ['docx', 'xlsx', 'pptx', 'pdf'] as const;
 export type OfficeExtension = (typeof OFFICE_EXTENSIONS)[number];
 
 export function officeExtensionOf(path: string): OfficeExtension | null {
@@ -27,6 +28,7 @@ export const OFFICE_MIME: Record<OfficeExtension, string> = {
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  pdf: 'application/pdf',
 };
 
 /** 텍스트 원본을 실제 오피스 파일(Blob)로 변환합니다. 오피스 확장자가 아니면 null. */
@@ -35,7 +37,40 @@ export async function renderOfficeFile(path: string, source: string): Promise<Bl
   if (!ext) return null;
   if (ext === 'docx') return htmlToDocx(source);
   if (ext === 'xlsx') return csvToXlsx(source);
+  if (ext === 'pdf') return htmlToPdf(source);
   return markdownToPptx(source);
+}
+
+// ── .pdf ─────────────────────────────────────────────────────────────────────
+
+/**
+ * 인쇄용 HTML 을 실제 PDF 로 만듭니다. 화면 밖에 A4 폭(794px)으로 렌더링한 뒤 페이지 단위로 담습니다.
+ * 한글 글꼴은 브라우저가 렌더링하므로 별도 글꼴 파일이 필요 없습니다 (텍스트는 이미지로 담깁니다).
+ */
+async function htmlToPdf(html: string): Promise<Blob> {
+  const html2pdf = (await import('html2pdf.js')).default;
+  const parsed = new DOMParser().parseFromString(html, 'text/html');
+  const host = document.createElement('div');
+  host.className = 'pdf-render-host';
+  host.style.cssText = 'position:fixed;left:-20000px;top:0;width:794px;padding:0;background:#fff;color:#111;font-family:"Malgun Gothic","Apple SD Gothic Neo",sans-serif;font-size:12pt;line-height:1.6;';
+  const styles = Array.from(parsed.querySelectorAll('style')).map((node) => node.outerHTML).join('');
+  host.innerHTML = `${styles}<div class="pdf-page-body">${parsed.body.innerHTML}</div>`;
+  host.querySelectorAll('script').forEach((node) => node.remove());
+  document.body.appendChild(host);
+  try {
+    await (document as Document & { fonts?: { ready: Promise<unknown> } }).fonts?.ready;
+    // 정적 타입은 '(): Worker' 와 '(el): Promise' 오버로드가 섞여 있어 명시적으로 워커 생성자를 씁니다.
+    const worker = new html2pdf.Worker();
+    return await worker.set({
+      margin: [12, 12, 14, 12],
+      image: { type: 'jpeg', quality: 0.95 },
+      html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff', logging: false },
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+      pagebreak: { mode: ['css', 'legacy'] },
+    } as unknown as Parameters<typeof worker.set>[0]).from(host).outputPdf('blob') as Promise<Blob>;
+  } finally {
+    host.remove();
+  }
 }
 
 /** 브라우저 다운로드로 내려받습니다 — 운영체제가 Word·Excel·PowerPoint 로 엽니다. */

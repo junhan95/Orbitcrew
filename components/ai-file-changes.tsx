@@ -32,6 +32,7 @@ function openLabel(path: string): string {
   if (ext === 'docx' || ext === 'doc') return 'Word 로 열기';
   if (ext === 'xlsx' || ext === 'xls' || ext === 'csv') return 'Excel 로 열기';
   if (ext === 'pptx' || ext === 'ppt') return 'PowerPoint 로 열기';
+  if (ext === 'pdf') return 'PDF 열기';
   return isBrowserViewable(path) ? '새 탭에서 열기' : '내려받기';
 }
 type Root = { id: string; name: string; handle: FsDirHandle; originals: Map<string, string> };

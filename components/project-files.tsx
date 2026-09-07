@@ -56,13 +56,14 @@ async function openServerFileInNewTab(id: string, path: string) {
  * 텍스트(.md 등)처럼 화면에서 보여 줘야 하는 파일이면 내용을 돌려주고(false 대신), 호출자가 미리보기를 띄웁니다.
  */
 export async function openServerArtifact(file: Pick<ServerArtifact, 'id' | 'path'>, onNotice: (message: string) => void): Promise<{ opened: true } | { opened: false; text: string }> {
-  if (isBrowserViewable(file.path)) { await openServerFileInNewTab(file.id, file.path); return { opened: true }; }
+  // .pdf 의 서버 보관본은 인쇄용 HTML 원본 — 먼저 실제 PDF 로 변환해 내려받습니다.
+  if (isBrowserViewable(file.path) && !isOfficePath(file.path)) { await openServerFileInNewTab(file.id, file.path); return { opened: true }; }
   const response = await fetch(`/api/task-files/${encodeURIComponent(file.id)}`);
   const data = await response.json() as { file?: { content: string }; error?: string };
   if (!response.ok || !data.file) throw new Error(data.error ?? '파일을 열지 못했습니다.');
   if (isOfficePath(file.path)) {
     const blob = await renderOfficeFile(file.path, data.file.content);
-    if (blob) { downloadBlob(file.path, blob); onNotice(t('파일을 내려받았습니다 — Word·Excel·PowerPoint 에서 열어 보세요. 작업 폴더에도 같은 파일이 있습니다.')); return { opened: true }; }
+    if (blob) { downloadBlob(file.path, blob); onNotice(file.path.toLowerCase().endsWith('.pdf') ? t('PDF 를 내려받았습니다. 작업 폴더에도 같은 파일이 있습니다.') : t('파일을 내려받았습니다 — Word·Excel·PowerPoint 에서 열어 보세요. 작업 폴더에도 같은 파일이 있습니다.')); return { opened: true }; }
   }
   if (DESKTOP_APP_FILE.test(file.path)) {
     downloadBlob(file.path, new Blob([data.file.content], { type: mimeOf(file.path) }));
