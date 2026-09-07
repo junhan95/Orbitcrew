@@ -44,6 +44,7 @@ export function followUpPrompt(params: { reporter: string; title: string; blocke
   }
   lines.push(
     '- 위임했다면 누구에게 무엇을 맡겼는지 한두 문장으로만 알리고 끝내세요. 같은 일을 두 번 맡기지 말고, 이미 검토까지 끝난 결과를 다시 검토시키지 마세요.',
+    "- '이번 임무' 섹션에 아직 대기·진행 중인 팀원 업무가 남아 있고 그 결과가 있어야 다음 단계를 정할 수 있으면, 새로 위임하지 말고 기다린다고 한 문장으로만 알리고 끝내세요.",
     `- 이번 임무에서 자동 진행은 ${MAX_FOLLOW_UP_DEPTH}단계까지만 이어집니다 (지금 ${params.depth + 1}단계). 남은 단계가 없으면 현재 결과로 마무리 안내를 하세요.`,
   );
   return lines.join('\n');

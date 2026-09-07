@@ -74,7 +74,7 @@ export function ReviewActions({ taskId, hasResult, onNotice, onDone }: {
   async function run(force = false) {
     setBusy('run');
     try {
-      const response = await fetch('/api/agents/run', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ taskId, force }) });
+      const response = await fetch('/api/agents/run', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ taskId, force, reportToManager: 'auto' }) });
       const data = await response.json().catch(() => ({})) as RunResult;
       if (response.status === 409 && data.circuitBreaker) { setBreaker(data.circuitBreaker); return; }
       if (!response.ok) throw new Error(data.error ?? t('실행하지 못했습니다.'));

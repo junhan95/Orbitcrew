@@ -1581,6 +1581,9 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
   // 백그라운드 실행이 끝났을 때 "지금 보고 있는 프로젝트" 를 알기 위한 ref (클로저의 projectId 는 시작 시점 값).
   const projectIdRef = useRef(projectId);
   useEffect(() => { projectIdRef.current = projectId; }, [projectId]);
+  // 이 프로젝트에서 팀원이 작업 중인지 — 주기 폴링이 메시지를 다시 읽을지 정할 때 씁니다.
+  const backgroundRef = useRef(false);
+  useEffect(() => { backgroundRef.current = projectBackground.length > 0; }, [projectBackground]);
   const [messageReload, setMessageReload] = useState(0);
   // '대화하기'·업무 목록에서 넘어온 제안 문장. 입력란에 회색(placeholder)으로만 보이고, 사용자가 아무것도 안 적고 보내면 이 문장이 나갑니다.
   const [suggestion, setSuggestion] = useState(initial?.draft ?? '');
@@ -1650,7 +1653,11 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
   // 상태 점이 실시간에 가깝게 따라가도록, 화면이 보이는 동안 8초마다 업무를 다시 읽습니다.
   useEffect(() => {
     if (!visible || !projectId) return;
-    const timer = setInterval(() => { if (document.visibilityState === 'visible') loadBoardTasks(); }, 8_000);
+    const timer = setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      loadBoardTasks();
+      if (backgroundRef.current) setMessageReload((value) => value + 1);
+    }, 8_000);
     return () => clearInterval(timer);
   }, [visible, projectId, loadBoardTasks]);
 
@@ -1791,26 +1798,39 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
       });
       const data = await response.json().catch(() => null) as {
         error?: string; blocked?: boolean; blockedReason?: string | null; summary?: string;
-        followUp?: { ran: boolean; reason?: string; delegated: Array<{ taskId: string; title: string; agent: string; outcome: string }>; recruited: Array<{ name: string; role: string }> } | null;
+        chain?: {
+          followUps: Array<{ ran: boolean; reason?: string; delegated: Array<{ taskId: string; title: string; agent: string; outcome: string; summary?: string }>; recruited: Array<{ name: string; role: string }> }>;
+          runs: Array<{ taskId: string; agent: string; title: string; blocked: boolean; summary: string }>;
+          depth: number;
+        } | null;
       } | null;
       if (!response.ok) throw new Error(data?.error || t("팀원 실행에 실패했습니다."));
       outcome = data?.blocked ? 'blocked' : 'completed';
       summary = (data?.blocked ? data.blockedReason : data?.summary) || '';
       onNotice(data?.blocked ? tf('{0} 에이전트가 진행 중 문제를 매니저에게 보고했습니다.', agent) : tf('{0} 에이전트가 업무를 완료하고 매니저에게 보고했습니다.', agent));
-      // 매니저 자동 진행: 보고를 받은 매니저가 다음 단계를 진행했으면, 새로 위임된 카드를 이어서 실행합니다 (실행 → 보고 → 자동 진행 사슬).
-      const followUp = data?.followUp;
-      if (followUp?.ran && runProjectId === projectIdRef.current) {
-        for (const member of followUp.recruited) {
-          setSteps((current) => [...current, { id: `r-${member.name}-${current.length}`, kind: 'recruited', agent: member.name, role: member.role }]);
+      // 매니저 자동 진행 사슬: 서버가 보고 → 자동 진행 → 위임 실행 → … 을 이어서 돌린 결과입니다. 화면의 진행 흔적에 반영하고,
+      // 깊이 상한으로 실행하지 못한 위임('queued')만 브라우저가 이어서 시작합니다.
+      const chain = data?.chain;
+      if (chain) {
+        const sameProject = runProjectId === projectIdRef.current;
+        const leftover: Array<{ taskId: string; agent: string; title: string }> = [];
+        for (const followUp of chain.followUps) {
+          if (!followUp.ran) continue;
+          if (sameProject) for (const member of followUp.recruited) {
+            setSteps((current) => [...current, { id: `r-${member.name}-${current.length}`, kind: 'recruited', agent: member.name, role: member.role }]);
+          }
+          for (const item of followUp.delegated) {
+            if (!item.taskId) continue;
+            if (item.outcome === 'queued') { leftover.push(item); continue; }
+            const state = item.outcome === 'completed' ? 'completed' as const : 'blocked' as const;
+            if (sameProject) setSteps((current) => [...current, { id: `c-${item.agent}-${current.length}`, kind: 'delegate', agent: item.agent, role: '', title: item.title, state, summary: item.summary ?? '', taskId: item.taskId }]);
+          }
         }
-        const queued = followUp.delegated.filter((item) => item.outcome === 'queued' && item.taskId);
-        for (const item of queued) {
-          setSteps((current) => [...current, { id: `q-${item.agent}-${current.length}`, kind: 'delegate', agent: item.agent, role: '', title: item.title, state: 'running', taskId: item.taskId }]);
+        if (sameProject && chain.followUps.some((item) => item.ran)) {
+          const names = chain.runs.map((item) => item.agent);
+          onNotice(names.length ? tf('매니저가 다음 단계로 {0}에게 업무를 맡겼습니다.', Array.from(new Set(names)).join(', ')) : t('매니저가 결과를 정리해 안내했습니다.'));
         }
-        onNotice(queued.length ? tf('매니저가 다음 단계로 {0}에게 업무를 맡겼습니다.', queued.map((item) => item.agent).join(', ')) : t('매니저가 결과를 정리해 안내했습니다.'));
-        for (const item of queued) void startBackgroundRun(item.taskId, item.agent, item.title, chainDepth + 1);
-      } else if (followUp?.ran) {
-        for (const item of followUp.delegated.filter((entry) => entry.outcome === 'queued' && entry.taskId)) void startBackgroundRun(item.taskId, item.agent, item.title, chainDepth + 1);
+        for (const item of leftover) void startBackgroundRun(item.taskId, item.agent, item.title, chain.depth + 1);
       }
     } catch (error) {
       outcome = 'blocked';
