@@ -419,6 +419,8 @@ export default function Home() {
     setChatTarget({ ...target, key: Date.now() });
     goTo('대화');
   }, [goTo]);
+  // 바로가기가 적용된 뒤 비웁니다 — 화면을 다시 마운트해도 같은 카드가 또 열리지 않도록.
+  const consumeProjectTarget = useCallback(() => setProjectTarget(null), []);
   const openProject = useCallback((projectId: string, taskId?: string) => {
     setProjectTarget({ projectId, taskId, key: Date.now() });
     goTo('프로젝트');
@@ -745,7 +747,7 @@ export default function Home() {
             ? <MemoryView onNotice={flash} onChanged={refreshInbox} />
             : activeNav === '스킬'
             ? <SkillsView onNotice={flash} />
-            : activeNav === '대화' ? null : <WorkspaceView section={activeNav} displayName={displayName} email={email} onNotice={flash} chatTarget={chatTarget} onOpenChat={openChat} projectTarget={projectTarget}
+            : activeNav === '대화' ? null : <WorkspaceView section={activeNav} displayName={displayName} email={email} onNotice={flash} chatTarget={chatTarget} onOpenChat={openChat} projectTarget={projectTarget} onProjectTargetConsumed={consumeProjectTarget}
                 onProfileSaved={(next) => { if (next.displayName) setDisplayName(next.displayName.split('@')[0]); setEmail(next.email); setAvatar(next.avatar); }} />}
           {/* 대화 화면은 탭을 오가도 살려 둡니다. 이 래퍼가 page-content 의 직접 자식이라 세로 공간을 여기서 이어받아야 입력창이 화면 아래에 고정됩니다 (.chat-host). */}
           {(chatVisited || activeNav === '대화') && <div className="chat-host" hidden={activeNav !== '대화'} style={activeNav !== '대화' ? { display: 'none' } : undefined}>
