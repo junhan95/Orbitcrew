@@ -6,8 +6,10 @@
  *
  *   이미지 · PDF → base64 로 그대로 모델에 넘겨 Claude 가 직접 봅니다.
  *   텍스트·코드·CSV·Markdown → 내용을 읽어 텍스트 블록으로 붙입니다.
+ *   Word(.docx)·Excel(.xlsx/.xls)·PowerPoint(.pptx) → 브라우저에서 텍스트를 뽑아 텍스트 블록으로 붙입니다 (lib/office-read).
  *   그 밖의 형식은 받지 않습니다.
  */
+import { extractOfficeText, isOfficeTextSource } from './office-read';
 export type AttachmentKind = 'image' | 'document' | 'text';
 
 export type ChatAttachment = {
@@ -41,6 +43,7 @@ const TEXT_EXTENSIONS = new Set([
 /** <input type="file"> 의 accept 값 */
 export const ATTACHMENT_ACCEPT = [
   'image/png', 'image/jpeg', 'image/webp', 'image/gif', 'application/pdf',
+  '.docx', '.xlsx', '.xls', '.pptx',
   ...[...TEXT_EXTENSIONS].map((extension) => `.${extension}`),
 ].join(',');
 
@@ -54,6 +57,8 @@ export function classifyAttachment(file: File): AttachmentKind | null {
   if (IMAGE_TYPES.has(file.type)) return 'image';
   if (file.type === 'application/pdf' || extensionOf(file.name) === 'pdf') return 'document';
   if (file.type.startsWith('text/') || TEXT_EXTENSIONS.has(extensionOf(file.name))) return 'text';
+  // 오피스 문서는 텍스트를 뽑아 텍스트 첨부로 보냅니다.
+  if (isOfficeTextSource(file.name)) return 'text';
   return null;
 }
 
@@ -85,10 +90,13 @@ export async function readAttachment(file: File): Promise<{ attachment: ChatAtta
   if (!kind) return { error: 'type' };
   if (file.size > MAX_ATTACHMENT_BYTES) return { error: 'size' };
   try {
-    const data = kind === 'text' ? (await file.text()).slice(0, MAX_TEXT_CHARS) : await readAsBase64(file);
+    const data = kind === 'text'
+      ? (isOfficeTextSource(file.name) ? await extractOfficeText(file) : await file.text()).slice(0, MAX_TEXT_CHARS)
+      : await readAsBase64(file);
+    if (kind === 'text' && !data.trim()) return { error: 'read' };
     const mediaType = kind === 'document'
       ? 'application/pdf'
-      : kind === 'image' ? file.type : (file.type || 'text/plain');
+      : kind === 'image' ? file.type : (isOfficeTextSource(file.name) ? 'text/plain' : (file.type || 'text/plain'));
     return {
       attachment: { key: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, name: file.name, kind, mediaType, size: file.size, data },
     };
