@@ -1498,6 +1498,28 @@ function AgentsView({ agents, projects, assignments, defaultModel, onCreated, on
  * 위임 한 건은 하위 에이전트를 실제로 돌리는 것이라 수십 초가 걸려서,
  * 시작(running)과 결과(completed/blocked)를 나눠 표시합니다.
  */
+/**
+ * 대화 사이드바의 에이전트 상태 점.
+ * running(녹색 깜빡임) 업무 진행 중 · done(녹색) 결과가 검토 대기 중 · failed(빨강 깜빡임) 진행 불가/실패 · idle(회색 테두리) 맡은 일 없음.
+ */
+type Presence = 'running' | 'done' | 'failed' | 'idle' | 'complete';
+const PRESENCE_LABEL: Record<Presence, string> = { running: '업무 진행 중', done: '결과 검토 대기', failed: '진행 불가 — 확인 필요', idle: '대기 중', complete: '임무 완료' };
+function agentPresence(name: string, tasks: ProjectTask[], busy: boolean): Presence {
+  const mine = tasks.filter((task) => task.owner === name);
+  if (mine.some((task) => task.blockedReason && task.status !== '검토')) return 'failed';
+  if (busy || mine.some((task) => task.status === '진행 중')) return 'running';
+  if (mine.some((task) => task.status === '검토')) return 'done';
+  return 'idle';
+}
+/** 매니저는 팀 전체를 봅니다 — 팀원 중 하나라도 진행 중이면 진행, 막힌 팀원이 있으면 실패, 맡긴 일이 전부 검토 단계에 이르렀으면 임무 완료(녹색 체크). */
+function managerPresence(tasks: ProjectTask[], sending: boolean, teammatesBusy: boolean): Presence {
+  if (tasks.some((task) => task.blockedReason && task.status !== '검토')) return 'failed';
+  if (sending || teammatesBusy || tasks.some((task) => task.status === '진행 중')) return 'running';
+  if (tasks.length && tasks.every((task) => task.status === '검토')) return 'complete';
+  if (tasks.some((task) => task.status === '검토')) return 'done';
+  return 'idle';
+}
+
 type ManagerStep =
   | { id: string; kind: 'recruited'; agent: string; role: string }
   | { id: string; kind: 'delegate'; agent: string; role: string; title: string; state: 'running' | 'completed' | 'blocked'; summary?: string; taskId?: string };
@@ -1573,6 +1595,12 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
   }, [projectId]);
 
   useEffect(() => { loadBoardTasks(); }, [loadBoardTasks]);
+  // 상태 점이 실시간에 가깝게 따라가도록, 화면이 보이는 동안 8초마다 업무를 다시 읽습니다.
+  useEffect(() => {
+    if (!visible || !projectId) return;
+    const timer = setInterval(() => { if (document.visibilityState === 'visible') loadBoardTasks(); }, 8_000);
+    return () => clearInterval(timer);
+  }, [visible, projectId, loadBoardTasks]);
 
   const loadFolders = useCallback(() => {
     if (!projectId) return;
@@ -1883,7 +1911,12 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
 
   return <div className="workspace-view chat-page"><ViewHeading eyebrow="Agent Chat" title={t("대화")} description={t("매니저에게 지시하면 대화 중에 팀을 꾸리고 업무를 맡겨 결과까지 가져옵니다.")}
     action={<div className="view-actions"><Button variant="outline" disabled={!projectId || !onOpenProject} onClick={() => { if (projectId) onOpenProject?.(projectId); }}><FolderKanban size={15} /> {t("프로젝트 바로가기")}</Button></div>} />
-    <div className="chat-shell"><aside className="chat-context"><label>{t("프로젝트")}<NativeSelect data-tour="chat-project" value={projectId} onChange={(event) => { setProjectId(event.target.value); setAgentId(''); setWantedAgent(''); }}><NativeSelectOption value="">{t("프로젝트 선택")}</NativeSelectOption>{projects.map((project) => <NativeSelectOption key={project.id} value={project.id}>{project.name}</NativeSelectOption>)}</NativeSelect></label><strong>{t("참여 에이전트")}</strong>{availableAgents.map((agent) => <button data-tour={agent.isManager ? 'chat-manager' : undefined} aria-pressed={selectedAgentId === agent.id} className={selectedAgentId === agent.id ? 'chat-agent active' : 'chat-agent'} key={agent.id} onClick={() => { setAgentId(agent.id); setWantedAgent(''); if (agent.isManager) tutorialEvent('manager-selected'); }}><span style={{ background: agent.color }}>{agent.isManager ? <Bot size={17} aria-hidden="true" /> : agent.name[0]}</span><div><b>{agent.name}</b><small>{t(agent.role)}</small></div></button>)}
+    <div className="chat-shell"><aside className="chat-context"><label>{t("프로젝트")}<NativeSelect data-tour="chat-project" value={projectId} onChange={(event) => { setProjectId(event.target.value); setAgentId(''); setWantedAgent(''); }}><NativeSelectOption value="">{t("프로젝트 선택")}</NativeSelectOption>{projects.map((project) => <NativeSelectOption key={project.id} value={project.id}>{project.name}</NativeSelectOption>)}</NativeSelect></label><strong>{t("참여 에이전트")}</strong>{availableAgents.map((agent) => <button data-tour={agent.isManager ? 'chat-manager' : undefined} aria-pressed={selectedAgentId === agent.id} className={selectedAgentId === agent.id ? 'chat-agent active' : 'chat-agent'} key={agent.id} onClick={() => { setAgentId(agent.id); setWantedAgent(''); if (agent.isManager) tutorialEvent('manager-selected'); }}>{(() => {
+                const presence = agent.isManager
+                  ? managerPresence(boardTasks, sending && selectedAgentId === agent.id, background.length > 0)
+                  : agentPresence(agent.name, boardTasks, background.some((item) => item.agent === agent.name));
+                return <i className={`presence ${presence}`} title={t(PRESENCE_LABEL[presence])} aria-label={tf('{0} 상태: {1}', agent.name, t(PRESENCE_LABEL[presence]))}>{presence === 'complete' && <Check size={9} strokeWidth={3} aria-hidden="true" />}</i>;
+              })()}<span style={{ background: agent.color }}>{agent.isManager ? <Bot size={17} aria-hidden="true" /> : agent.name[0]}</span><div><b>{agent.name}</b><small>{t(agent.role)}</small></div></button>)}
       <strong className="chat-tasks-title">{t("이 프로젝트의 업무")}<em>{boardTasks.length}</em></strong>
       <div className="chat-tasks">
         {boardTasks.map((task) => <button className="chat-task" key={task.id} title={`${task.owner} · ${t(task.status)}`}
