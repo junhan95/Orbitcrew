@@ -781,19 +781,31 @@ export default function Home() {
           <DialogHeader>
             <DialogTitle>{creditsPrompt?.cause === 'provider' ? t('Anthropic API 키 잔액이 부족합니다') : t('크레딧이 부족합니다')}</DialogTitle>
             <DialogDescription>
-              {creditsPrompt?.message || t('크레딧 잔액이 부족합니다. 충전하거나 본인 API 키를 연결해 주세요.')}
-              {' '}{t('대화와 팀원 실행은 잔액이 생길 때까지 진행되지 않습니다.')}
+              {creditsPrompt?.cause === 'provider'
+                ? t('연결한 본인 API 키의 Anthropic 계정 잔액이 0이라 대화와 팀원 실행이 멈춰 있습니다. 둘 중 한 가지로 이어갈 수 있습니다.')
+                : t('크레딧이 바닥나 대화와 팀원 실행이 멈춰 있습니다. 둘 중 한 가지로 이어갈 수 있습니다.')}
             </DialogDescription>
           </DialogHeader>
+          <ul className="credits-options">
+            {creditsPrompt?.cause === 'provider'
+              ? <>
+                <li><strong>{t('Anthropic 콘솔에서 충전')}</strong><span>{t('console.anthropic.com → Plans & Billing 에서 잔액을 채우면 지금 키로 바로 이어집니다.')}</span></li>
+                <li><strong>{t('orbitcrew 크레딧 충전')}</strong><span>{t('계정 화면에서 키를 지우고 크레딧을 충전하면 그 크레딧으로 실행됩니다.')}</span></li>
+              </>
+              : <>
+                <li><strong>{t('orbitcrew 크레딧 충전')}</strong><span>{t('계정 화면에서 충전하면 바로 이어집니다.')}</span></li>
+                <li><strong>{t('본인 API 키 연결')}</strong><span>{t('Anthropic API 키를 연결하면 크레딧을 쓰지 않고 그 키로 실행됩니다.')}</span></li>
+              </>}
+          </ul>
           <DialogFooter>
             {creditsPrompt?.cause === 'provider'
               ? <>
-                <Button variant="outline" onClick={() => { setCreditsPrompt(null); goTo('계정'); }}>{t('키를 지우고 크레딧으로 전환')}</Button>
+                <Button variant="outline" onClick={() => { setCreditsPrompt(null); goTo('계정'); }}>{t('orbitcrew 크레딧 충전')}</Button>
                 <Button onClick={() => { window.open('https://console.anthropic.com/settings/billing', '_blank', 'noopener'); }}>{t('Anthropic 콘솔에서 충전')} <ArrowUpRight size={14} /></Button>
               </>
               : <>
                 <Button variant="outline" onClick={() => { setCreditsPrompt(null); setApiKeyOpen(true); }}>{t('본인 API 키 연결')}</Button>
-                <Button onClick={() => { setCreditsPrompt(null); goTo('계정'); }}>{t('크레딧 충전하기')}</Button>
+                <Button onClick={() => { setCreditsPrompt(null); goTo('계정'); }}>{t('orbitcrew 크레딧 충전')}</Button>
               </>}
           </DialogFooter>
         </DialogContent>
