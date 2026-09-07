@@ -4,7 +4,7 @@
 import { FolderPermissions } from '@/components/folder-permissions';
 import { useAIFileChanges } from '@/components/ai-file-changes';
 import { LocalFileWorkspace, SaveCodeFiles } from '@/components/local-file-workspace';
-import { ProjectFileButtons } from '@/components/project-files';
+import { ProjectFileButtons, openTaskArtifact } from '@/components/project-files';
 import { forgetFolderArtifacts } from '@/lib/project-artifacts';
 import { ProjectTutorialFields } from '@/components/project-tutorial-fields';
 import { tutorialEvent, tutorialExample } from '@/components/tutorial';
@@ -1771,11 +1771,15 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
       const anchor = (event.target as HTMLElement | null)?.closest?.('a[href^="#task/"]') as HTMLAnchorElement | null;
       if (!anchor || !projectId) return;
       event.preventDefault();
-      onOpenProject?.(projectId, anchor.getAttribute('href')?.slice('#task/'.length));
+      const taskId = anchor.getAttribute('href')?.slice('#task/'.length) ?? '';
+      // 산출물 파일이 있으면 그 자리에서 엽니다 (프로젝트의 '결과보기' 와 같은 동작). 없으면 카드 상세로.
+      void openTaskArtifact(projectId, taskId, onNotice)
+        .then((opened) => { if (!opened) onOpenProject?.(projectId, taskId); })
+        .catch(() => onOpenProject?.(projectId, taskId));
     };
     node.addEventListener('click', onClick);
     return () => node.removeEventListener('click', onClick);
-  }, [projectId, onOpenProject]);
+  }, [projectId, onOpenProject, onNotice]);
 
   useEffect(() => {
     const insert = (event: Event) => { if ((event as CustomEvent<string>).detail === 'insert-example' && !sending) { if (draft.trim()) { onNotice(t('입력한 내용이 있습니다. 예시를 참고해 직접 수정하세요.')); return; } setDraft(tutorialExample()); } };

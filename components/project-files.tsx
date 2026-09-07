@@ -51,6 +51,43 @@ async function openServerFileInNewTab(id: string, path: string) {
   } catch (error) { tab?.close(); throw error; }
 }
 
+/**
+ * 서버 보관 산출물을 엽니다 — HTML·이미지·PDF 는 새 탭, .docx/.xlsx/.pptx 는 실제 오피스 파일로 변환해 내려받기, CSV 등은 내려받기.
+ * 텍스트(.md 등)처럼 화면에서 보여 줘야 하는 파일이면 내용을 돌려주고(false 대신), 호출자가 미리보기를 띄웁니다.
+ */
+export async function openServerArtifact(file: Pick<ServerArtifact, 'id' | 'path'>, onNotice: (message: string) => void): Promise<{ opened: true } | { opened: false; text: string }> {
+  if (isBrowserViewable(file.path)) { await openServerFileInNewTab(file.id, file.path); return { opened: true }; }
+  const response = await fetch(`/api/task-files/${encodeURIComponent(file.id)}`);
+  const data = await response.json() as { file?: { content: string }; error?: string };
+  if (!response.ok || !data.file) throw new Error(data.error ?? '파일을 열지 못했습니다.');
+  if (isOfficePath(file.path)) {
+    const blob = await renderOfficeFile(file.path, data.file.content);
+    if (blob) { downloadBlob(file.path, blob); onNotice(t('파일을 내려받았습니다 — Word·Excel·PowerPoint 에서 열어 보세요. 작업 폴더에도 같은 파일이 있습니다.')); return { opened: true }; }
+  }
+  if (DESKTOP_APP_FILE.test(file.path)) {
+    downloadBlob(file.path, new Blob([data.file.content], { type: mimeOf(file.path) }));
+    onNotice(t('파일을 내려받았습니다 — Word·Excel·PowerPoint 에서 열어 보세요. 작업 폴더에도 같은 파일이 있습니다.'));
+    return { opened: true };
+  }
+  return { opened: false, text: data.file.content };
+}
+
+/** 업무 카드 하나의 최신 산출물을 바로 엽니다. 산출물이 없으면 false — 호출자가 카드 상세로 대신 안내합니다. */
+export async function openTaskArtifact(projectId: string, taskId: string, onNotice: (message: string) => void): Promise<boolean> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/files`);
+  if (!response.ok) return false;
+  const data = await response.json() as { files?: ServerArtifact[] };
+  const mine = (data.files ?? []).filter((file) => file.taskId === taskId).sort((a, b) => b.updatedAt - a.updatedAt);
+  const latest = mine[0];
+  if (!latest) return false;
+  const result = await openServerArtifact(latest, onNotice);
+  if (result.opened) return true;
+  // 텍스트 산출물은 내려받아 열게 합니다 (대화 화면에는 미리보기 창이 없음).
+  downloadBlob(latest.path, new Blob([result.text], { type: mimeOf(latest.path) }));
+  onNotice(t('파일을 내려받았습니다.'));
+  return true;
+}
+
 export function useProjectArtifacts(projectId: string): ProjectArtifact[] {
   const [artifacts, setArtifacts] = useState<ProjectArtifact[]>([]);
   useEffect(() => {
@@ -134,21 +171,8 @@ export function ProjectFileButtons({ projectId, onNotice, spotlightKey = 0 }: { 
         return;
       }
       if (!server) { onNotice(t('저장된 산출물이 아직 없습니다.')); return; }
-      if (isBrowserViewable(server.path)) { await openServerFileInNewTab(server.id, server.path); return; }
-      const response = await fetch(`/api/task-files/${encodeURIComponent(server.id)}`);
-      const data = await response.json() as { file?: { content: string }; error?: string };
-      if (!response.ok || !data.file) throw new Error(data.error ?? '파일을 열지 못했습니다.');
-      if (isOfficePath(server.path)) {
-        // 서버 보관본은 텍스트 원본 — 여기서 실제 오피스 파일로 변환해 내려받습니다.
-        const blob = await renderOfficeFile(server.path, data.file.content);
-        if (blob) { downloadBlob(server.path, blob); onNotice(t('파일을 내려받았습니다 — Word·Excel·PowerPoint 에서 열어 보세요. 작업 폴더에도 같은 파일이 있습니다.')); return; }
-      }
-      if (DESKTOP_APP_FILE.test(server.path)) {
-        downloadBlob(server.path, new Blob([data.file.content], { type: mimeOf(server.path) }));
-        onNotice(t('파일을 내려받았습니다 — Word·Excel·PowerPoint 에서 열어 보세요. 작업 폴더에도 같은 파일이 있습니다.'));
-        return;
-      }
-      setPreview({ path: server.path, text: data.file.content });
+      const result = await openServerArtifact(server, onNotice);
+      if (!result.opened) setPreview({ path: server.path, text: result.text });
     } catch (error) { fail(error, t('파일을 열지 못했습니다.')); }
     finally { setBusy(null); }
   }

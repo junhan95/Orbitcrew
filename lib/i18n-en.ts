@@ -405,6 +405,7 @@ export const EN: Record<string, string> = {
 '{0} 이(가) 작업 중입니다 — 끝나면 보고가 이 대화에 도착하고 매니저가 다음 단계를 이어 갑니다.': '{0} is working — the report lands here when done and the manager continues with the next step.',
 '파일을 내려받았습니다 — Word·Excel·PowerPoint 에서 열어 보세요. 작업 폴더에도 같은 파일이 있습니다.': 'Downloaded — open it in Word, Excel or PowerPoint. The same file is in your work folder.',
 '파일을 내려받았습니다 — Word·Excel·PowerPoint 에서 열어 보세요.': 'Downloaded — open it in Word, Excel or PowerPoint.',
+'파일을 내려받았습니다.': 'Downloaded.',
 'Word 로 열기': 'Open in Word',
 'Excel 로 열기': 'Open in Excel',
 'PowerPoint 로 열기': 'Open in PowerPoint',
