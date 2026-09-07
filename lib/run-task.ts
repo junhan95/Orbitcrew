@@ -20,7 +20,7 @@ import { RECALL_TOOL, executeRecallTool, recallDocUpsert } from '@/lib/recall';
 import { runTaskReview } from '@/lib/reviewer';
 import { FILE_CHANGE_TOOL, validateFileChange, type FileChange } from '@/lib/ai-file-changes';
 import { upsertTaskFile } from '@/lib/task-files';
-import { FILE_RULES, MANAGER_DELIVERABLE_RULES, REPORT_RULES } from '@/lib/deliverable-rules';
+import { FILE_RULES, MANAGER_DELIVERABLE_RULES, REPORT_RULES, requiresFileDeliverable } from '@/lib/deliverable-rules';
 import { syncMissionStatus } from '@/lib/mission';
 import { addTrace, traceEvent, traceError, withTrace } from '@/lib/telemetry';
 import { agentCommentInsert, checkCircuitBreaker, describeTaskCard, formatRunComment } from '@/lib/run-loop';
@@ -294,7 +294,7 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
   const skillSaves: RunTaskSuccess['skillSaves'] = [];
   const createCounter = { created: 0 };
   const memoryFailures = { count: 0 };
-  const counters = { recall: 0 };
+  const counters = { recall: 0, fileGate: 0 };
 
   const managerContext: ManagerContext | null = isManager && project ? {
     db, userId: user.userId, apiKey, fallbackModel,
@@ -359,6 +359,12 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
         }
         if (name === 'complete_task') {
           const status = input.status === 'blocked' ? 'blocked' : 'completed';
+          // 산출물 게이트 — 파일을 요구하는 카드인데 파일 없이 완료하려 하면 한 번 되돌려 저장하게 합니다 (두 번째는 통과시켜 무한 반복을 막음).
+          if (status === 'completed' && linkedFolders.length && !fileChanges.length && !isManager && counters.fileGate < 1 && requiresFileDeliverable(task.title, task.description ?? '')) {
+            counters.fileGate += 1;
+            logGate(db, user.userId, { gate: 'file_deliverable', decision: 'block', projectId: task.projectId, taskId: task.id });
+            return { error: `이 업무는 산출물을 파일로 저장해야 합니다. 아직 save_project_file 호출이 없습니다 — 완성된 전문을 save_project_file(folderId, path, content) 로 먼저 저장한 뒤(요구된 형식·파일명 준수, 예: 워드는 .doc 로 <html> 전체 문서) complete_task 를 다시 호출하세요. 저장 가능한 폴더: ${linkedFolders.map((folder) => `${folder.name}=${folder.id}`).join(', ')}` };
+          }
           const summary = typeof input.summary === 'string' ? input.summary.trim() : '';
           if (!summary) throw new Error('summary 는 비울 수 없습니다.');
           report.value = {

@@ -41,6 +41,16 @@ export const FILE_RULES = [
   '- proof 에 저장한 파일 경로를 반드시 적습니다.',
 ].join('\n');
 
+/**
+ * 카드가 파일 산출물을 요구하는지 — 본문·제목에 형식(워드·PDF·엑셀·HTML·마크다운·확장자)이나 "파일로 저장" 이 있으면 true.
+ * 검토·QA 카드는 발견을 보고하는 일이라 제외합니다.
+ */
+export function requiresFileDeliverable(title: string, description: string): boolean {
+  if (/(검토|QA|리뷰|review)/i.test(title)) return false;
+  const text = `${title}\n${description}`;
+  return /\.(docx?|md|html?|csv|txt|pdf|xlsx?)\b|워드|엑셀|PDF|마크다운|HTML|파일로\s*(저장|만들|작성|생성)|파일\s*형식|저장\s*폴더/i.test(text);
+}
+
 /** 매니저 — 형식 확인·brief 명시·최종 안내 규칙 */
 export const MANAGER_DELIVERABLE_RULES = [
   `- 산출물 형식 확인: 임무 지시에 결과물의 파일 형식(${FORMAT_CHOICES})이 없으면 위임하기 전에 사용자에게 어떤 형식으로 만들지 물어보고 답을 기다리세요 (선택지를 한 줄로 제시). 코드처럼 형식이 자명하거나 사용자가 "알아서" 라고 했으면 묻지 않고 기본값(문서 .md, 표 .csv, 화면 .html)을 씁니다. PDF 는 .html 로 만든 뒤 인쇄 저장, 워드는 .doc(HTML 기반), 엑셀은 .csv 로 만든다는 점을 사용자에게 한 줄로 알립니다.`,
