@@ -74,18 +74,27 @@ export async function openServerArtifact(file: Pick<ServerArtifact, 'id' | 'path
 
 /** 업무 카드 하나의 최신 산출물을 바로 엽니다. 산출물이 없으면 false — 호출자가 카드 상세로 대신 안내합니다. */
 export async function openTaskArtifact(projectId: string, taskId: string, onNotice: (message: string) => void): Promise<boolean> {
-  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/files`);
-  if (!response.ok) return false;
-  const data = await response.json() as { files?: ServerArtifact[] };
-  const mine = (data.files ?? []).filter((file) => file.taskId === taskId).sort((a, b) => b.updatedAt - a.updatedAt);
-  const latest = mine[0];
-  if (!latest) return false;
-  const result = await openServerArtifact(latest, onNotice);
-  if (result.opened) return true;
-  // 텍스트 산출물은 내려받아 열게 합니다 (대화 화면에는 미리보기 창이 없음).
-  downloadBlob(latest.path, new Blob([result.text], { type: mimeOf(latest.path) }));
-  onNotice(t('파일을 내려받았습니다.'));
-  return true;
+  const [filesResponse, tasksResponse] = await Promise.all([
+    fetch(`/api/projects/${encodeURIComponent(projectId)}/files`),
+    fetch(`/api/tasks?projectId=${encodeURIComponent(projectId)}`),
+  ]);
+  if (!filesResponse.ok) return false;
+  const files = ((await filesResponse.json() as { files?: ServerArtifact[] }).files ?? []);
+  const tasks = tasksResponse.ok ? ((await tasksResponse.json() as { tasks?: Array<{ id: string; parentTaskId?: string | null }> }).tasks ?? []) : [];
+  const parentOf = new Map(tasks.map((task) => [task.id, task.parentTaskId ?? null]));
+  const mission = parentOf.get(taskId) ?? taskId;
+  const sameMission = (id: string) => id === taskId || id === mission || parentOf.get(id) === mission;
+  // 실제 산출물(오피스·HTML·CSV·PDF·이미지)을 우선하고, 검토 메모 같은 텍스트 파일은 뒤로 — 같은 카드의 파일이 같은 임무의 다른 카드 파일보다 앞섭니다.
+  const isDeliverable = (path: string) => isOfficePath(path) || isBrowserViewable(path) || DESKTOP_APP_FILE.test(path);
+  const ranked = files
+    .filter((file) => sameMission(file.taskId))
+    .map((file) => ({ file, score: (isDeliverable(file.path) ? 2 : 0) + (file.taskId === taskId ? 1 : 0) }))
+    .sort((a, b) => b.score - a.score || b.file.updatedAt - a.file.updatedAt);
+  const best = ranked[0]?.file;
+  // 열 만한 산출물이 없으면(텍스트 결과뿐) 카드 상세에서 결과 본문을 보게 합니다.
+  if (!best || !isDeliverable(best.path)) return false;
+  const result = await openServerArtifact(best, onNotice);
+  return result.opened;
 }
 
 export function useProjectArtifacts(projectId: string): ProjectArtifact[] {
