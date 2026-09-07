@@ -399,6 +399,7 @@ export const EN: Record<string, string> = {
 '팀원 실행에 실패했습니다.': 'Teammate run failed.',
 '{0} 실행 실패: {1}': '{0} failed: {1}',
 '팀원이 작업 중': 'Teammates at work',
+'결과물이 준비되었습니다 — 눌러서 바로 확인하세요.': 'The deliverable is ready — click to open it.',
 '매니저가 다음 단계로 {0}에게 업무를 맡겼습니다.': 'The manager moved on and handed work to {0}.',
 '매니저가 결과를 정리해 안내했습니다.': 'The manager wrapped up and presented the result.',
 '임무': 'Missions',

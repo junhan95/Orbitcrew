@@ -52,9 +52,19 @@ async function openInNewTab(folderId: string, path: string) {
 
 type Preview = { path: string; text: string };
 
-export function ProjectFileButtons({ projectId, onNotice }: { projectId: string; onNotice: (message: string) => void }) {
+export function ProjectFileButtons({ projectId, onNotice, spotlightKey = 0 }: { projectId: string; onNotice: (message: string) => void;
+  /** 0 이 아니면(대화의 '결과 보기' 링크로 들어옴) '결과보기' 버튼을 잠시 강조합니다. 값이 바뀔 때마다 다시 강조. */
+  spotlightKey?: number }) {
   const artifacts = useProjectArtifacts(projectId);
   const [busy, setBusy] = useState<'results' | 'folder' | null>(null);
+  // 강조는 클릭하거나 15초가 지나면 꺼집니다.
+  const [dismissedKey, setDismissedKey] = useState(0);
+  const spotlight = spotlightKey !== 0 && spotlightKey !== dismissedKey && artifacts.length > 0;
+  useEffect(() => {
+    if (!spotlight) return;
+    const timer = setTimeout(() => setDismissedKey(spotlightKey), 15_000);
+    return () => clearTimeout(timer);
+  }, [spotlight, spotlightKey]);
   const [preview, setPreview] = useState<Preview | null>(null);
 
   const fail = useCallback((error: unknown, fallback: string) => {
@@ -64,6 +74,7 @@ export function ProjectFileButtons({ projectId, onNotice }: { projectId: string;
   /** 결과보기 — 가장 최근 산출물을 바로 띄웁니다. */
   async function showResult() {
     if (busy) return;
+    setDismissedKey(spotlightKey);
     setBusy('results');
     try {
       const linked = await fetchProjectFolders(projectId);
@@ -103,8 +114,8 @@ export function ProjectFileButtons({ projectId, onNotice }: { projectId: string;
   }
 
   return <div className="detail-file-actions">
-    <Button variant="outline" disabled={!artifacts.length || busy !== null} onClick={() => void showResult()}
-      title={artifacts.length ? undefined : t('에이전트가 작업을 완료하고 파일을 저장하면 열 수 있습니다.')}>
+    <Button variant="outline" className={spotlight ? 'spotlight-pulse' : undefined} disabled={!artifacts.length || busy !== null} onClick={() => void showResult()}
+      title={artifacts.length ? (spotlight ? t('결과물이 준비되었습니다 — 눌러서 바로 확인하세요.') : undefined) : t('에이전트가 작업을 완료하고 파일을 저장하면 열 수 있습니다.')}>
       {busy === 'results' ? <LoaderCircle size={14} className="spin" /> : <Sparkles size={14} />} {t('결과보기')}{artifacts.length > 0 && <em className="detail-file-count">{artifacts.length}</em>}
     </Button>
     <Button variant="outline" disabled={busy !== null} onClick={() => void openFolder()}>

@@ -529,6 +529,8 @@ function ProjectDetail({ project, agents, assignments, onBack, onNotice, onRenam
   const [counts, setCounts] = useState<Record<string, TaskCounts>>({});
   const [loading, setLoading] = useState(true);
   const [openTaskId, setOpenTaskId] = useState<string | null>(focusTask?.taskId ?? null);
+  // 대화의 '결과 보기' 로 들어온 회차 — 머리의 '결과보기' 버튼을 잠시 강조합니다.
+  const [spotlightKey, setSpotlightKey] = useState(focusTask?.taskId ? focusTask.key : 0);
   // 대화의 '📥 보고' 링크로 들어오면 그 카드를 바로 엽니다 (key 가 바뀔 때마다).
   const appliedFocus = useRef<number | null>(focusTask?.key ?? null);
   useEffect(() => {
@@ -536,6 +538,7 @@ function ProjectDetail({ project, agents, assignments, onBack, onNotice, onRenam
     if (focusTask.key !== appliedFocus.current) {
       appliedFocus.current = focusTask.key;
       setOpenTaskId(focusTask.taskId);
+      setSpotlightKey(focusTask.key);
     }
     // 1회성 이동 — 열었으니 부모가 target 을 비워 다음 마운트에서 또 뜨지 않게 합니다.
     onFocusApplied?.();
@@ -776,7 +779,7 @@ function ProjectDetail({ project, agents, assignments, onBack, onNotice, onRenam
         <span className="section-kicker">Project</span>
         <h1>{project.name}</h1>
         <p>{project.description || t("프로젝트 설명이 없습니다.")}</p>
-        <ProjectFileButtons projectId={project.id} onNotice={onNotice} />
+        <ProjectFileButtons projectId={project.id} onNotice={onNotice} spotlightKey={spotlightKey} />
       </div>
       <div className="view-actions">
         <span className="project-status"><i />{t(project.status)}</span>
