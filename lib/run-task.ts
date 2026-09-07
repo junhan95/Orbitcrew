@@ -3,7 +3,7 @@
  * 워커 컨텍스트·기억·스킬·게이트·검토·관제·기억 리뷰가 전부 여기 한곳에 있어야 두 경로의 동작이 같습니다.
  */
 import { getRuntimeConfig } from '@/db';
-import { runClaudeAgent, type ClaudeCredential, type ToolDefinition } from '@/lib/claude';
+import { runClaudeAgent, type ClaudeCredential, type ToolDefinition, type ToolInput } from '@/lib/claude';
 import { PRIORITY_HINT, toPriority } from '@/lib/priority';
 import {
   MANAGER_TOOLS, MANAGER_TOOL_NAMES, createManagerLog, executeManagerTool, loadMembers, renderTeam,
@@ -303,6 +303,27 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
   } : null;
 
   try {
+    /** complete_task — 본 실행과, 보고 없이 끝났을 때의 마무리 재요청이 함께 씁니다. */
+    const completeTask = async (input: ToolInput) => {
+      const status = input.status === 'blocked' ? 'blocked' : 'completed';
+      // 산출물 게이트 — 파일을 요구하는 카드인데 파일 없이 완료하려 하면 한 번 되돌려 저장하게 합니다 (두 번째는 통과시켜 무한 반복을 막음).
+      if (status === 'completed' && linkedFolders.length && !fileChanges.length && !isManager && counters.fileGate < 1 && requiresFileDeliverable(task.title, task.description ?? '')) {
+        counters.fileGate += 1;
+        logGate(db, user.userId, { gate: 'file_deliverable', decision: 'block', projectId: task.projectId, taskId: task.id });
+        return { error: `이 업무는 산출물을 파일로 저장해야 합니다. 아직 save_project_file 호출이 없습니다 — 완성된 전문을 save_project_file(folderId, path, content) 로 먼저 저장한 뒤(요구된 형식·파일명 준수, 예: 워드는 .doc 로 <html> 전체 문서) complete_task 를 다시 호출하세요. 저장 가능한 폴더: ${linkedFolders.map((folder) => `${folder.name}=${folder.id}`).join(', ')}` };
+      }
+      const summary = typeof input.summary === 'string' ? input.summary.trim() : '';
+      if (!summary) throw new Error('summary 는 비울 수 없습니다.');
+      report.value = {
+        status,
+        summary: summary.slice(0, 1200),
+        blockedReason: typeof input.blocked_reason === 'string' ? input.blocked_reason.trim().slice(0, 600) : null,
+        nextActions: Array.isArray(input.next_actions) ? input.next_actions.filter((item): item is string => typeof item === 'string').slice(0, 5) : [],
+        proof: Array.isArray(input.proof) ? input.proof.filter((item): item is string => typeof item === 'string' && Boolean(item.trim())).map((item) => item.trim().slice(0, 300)).slice(0, 5) : [],
+      };
+      return { ok: true, note: '보고가 저장되었습니다. 이 호출은 완료되었으니 반복하지 말고 짧게 마무리하세요.' };
+    };
+
     const result = await runClaudeAgent({
       beforeIteration: async () => { if (leaseLost) throw new LeaseLostError(); await renewLease(db, lease); },
       apiKey, model, system,
@@ -357,28 +378,36 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
             return { ok: true, status: 'saved', path: change.path, note: '파일이 보관되었고 사용자 폴더에도 저장됩니다. proof 에 이 경로를 적고, 결과 요약에는 전문 대신 경로와 핵심만 적으세요.' };
           } catch (error) { return { error: error instanceof Error ? error.message : '파일 저장 실패' }; }
         }
-        if (name === 'complete_task') {
-          const status = input.status === 'blocked' ? 'blocked' : 'completed';
-          // 산출물 게이트 — 파일을 요구하는 카드인데 파일 없이 완료하려 하면 한 번 되돌려 저장하게 합니다 (두 번째는 통과시켜 무한 반복을 막음).
-          if (status === 'completed' && linkedFolders.length && !fileChanges.length && !isManager && counters.fileGate < 1 && requiresFileDeliverable(task.title, task.description ?? '')) {
-            counters.fileGate += 1;
-            logGate(db, user.userId, { gate: 'file_deliverable', decision: 'block', projectId: task.projectId, taskId: task.id });
-            return { error: `이 업무는 산출물을 파일로 저장해야 합니다. 아직 save_project_file 호출이 없습니다 — 완성된 전문을 save_project_file(folderId, path, content) 로 먼저 저장한 뒤(요구된 형식·파일명 준수, 예: 워드는 .doc 로 <html> 전체 문서) complete_task 를 다시 호출하세요. 저장 가능한 폴더: ${linkedFolders.map((folder) => `${folder.name}=${folder.id}`).join(', ')}` };
-          }
-          const summary = typeof input.summary === 'string' ? input.summary.trim() : '';
-          if (!summary) throw new Error('summary 는 비울 수 없습니다.');
-          report.value = {
-            status,
-            summary: summary.slice(0, 1200),
-            blockedReason: typeof input.blocked_reason === 'string' ? input.blocked_reason.trim().slice(0, 600) : null,
-            nextActions: Array.isArray(input.next_actions) ? input.next_actions.filter((item): item is string => typeof item === 'string').slice(0, 5) : [],
-            proof: Array.isArray(input.proof) ? input.proof.filter((item): item is string => typeof item === 'string' && Boolean(item.trim())).map((item) => item.trim().slice(0, 300)).slice(0, 5) : [],
-          };
-          return { ok: true, note: '보고가 저장되었습니다. 이 호출은 완료되었으니 반복하지 말고 짧게 마무리하세요.' };
-        }
+        if (name === 'complete_task') return completeTask(input);
         throw new Error(`알 수 없는 툴: ${name}`);
       },
     });
+
+    // 텍스트로만 끝내고 complete_task 를 빠뜨린 실행(파일은 저장했는데 보고가 없는 경우가 흔함)은 '진행 불가' 로 만들지 않고,
+    // 보고만 한 번 더 강제로 받아 옵니다 (tool_choice 로 complete_task 고정, 1회).
+    if (!report.value && result.stopReason === 'end_turn' && result.text.trim()) {
+      try {
+        const wrapUp = await runClaudeAgent({
+          apiKey, model, system,
+          messages: [
+            { role: 'user', content: prompt },
+            { role: 'assistant', content: result.text },
+            { role: 'user', content: '[시스템] complete_task 호출이 없어 보고가 남지 않았습니다. 위 결과를 바탕으로 지금 complete_task 를 호출해 마무리하세요 — 실제로 끝났으면 status=completed, summary 에 핵심 결론(저장한 파일 경로 포함), proof 에 확인 근거(파일 경로·참조 자료), next_actions 에 후속 항목. 못 끝냈으면 status=blocked 와 blocked_reason.' },
+          ],
+          maxTokens: 1500, maxIterations: 1, toolChoice: 'complete_task', tools: [COMPLETE_TOOL],
+          executeTool: async (name, input) => (name === 'complete_task' ? completeTask(input) : { error: `알 수 없는 툴: ${name}` }),
+        });
+        result.usage = {
+          inputTokens: result.usage.inputTokens + wrapUp.usage.inputTokens, outputTokens: result.usage.outputTokens + wrapUp.usage.outputTokens,
+          cacheCreationTokens: result.usage.cacheCreationTokens + wrapUp.usage.cacheCreationTokens, cacheReadTokens: result.usage.cacheReadTokens + wrapUp.usage.cacheReadTokens,
+          webSearchRequests: result.usage.webSearchRequests + wrapUp.usage.webSearchRequests,
+        };
+        result.usagePerIteration.push(...wrapUp.usagePerIteration);
+        result.toolCalls.push(...wrapUp.toolCalls);
+        result.iterations += wrapUp.iterations;
+        if (report.value) traceEvent('run.completion_recovered', { taskId: task.id });
+      } catch (error) { traceError('run.completion_retry_failed', error); }
+    }
 
     const completedAt = Date.now();
     const done = report.value;
