@@ -91,7 +91,7 @@ export type RunTaskParams = {
   delegatedBy?: { managerName: string; parentTaskId: string | null } | null;
 };
 
-export type RunTaskFailure = { ok: false; status: number; error: string; circuitBreaker?: unknown };
+export type RunTaskFailure = { ok: false; status: number; error: string; circuitBreaker?: unknown; /** 'provider_credits' 등 — 화면이 안내창을 고르는 데 씁니다. */ code?: string };
 export type RunTaskSuccess = {
   ok: true; runId: string; taskId: string; status: string; output: string; summary: string;
   blocked: boolean; blockedReason: string | null; nextActions: string[]; proof: string[];
@@ -515,7 +515,8 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
     ]);
     } catch (writeError) { if (!isPreconditionError(writeError)) throw writeError; }
     const status = error instanceof Error && 'status' in error && typeof error.status === 'number' ? error.status : 502;
-    return { ok: false, status, error: message };
+    const code = error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : undefined;
+    return { ok: false, status, error: message, ...(code ? { code } : {}) };
   }
   } finally { clearInterval(heartbeat); await releaseLease(db, lease); }
 }

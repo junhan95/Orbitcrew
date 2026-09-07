@@ -29,7 +29,7 @@ async function handlePOST(request: Request) {
     force: body.force === true,
     folderContext: typeof body.folderContext === 'string' ? body.folderContext : '',
   });
-  if (!outcome.ok) return Response.json({ error: outcome.error, ...(outcome.circuitBreaker ? { circuitBreaker: outcome.circuitBreaker } : {}) }, { status: outcome.status });
+  if (!outcome.ok) return Response.json({ error: outcome.error, ...(outcome.code ? { code: outcome.code } : {}), ...(outcome.circuitBreaker ? { circuitBreaker: outcome.circuitBreaker } : {}) }, { status: outcome.status });
   const { ok: _ok, ...payload } = outcome;
   let chain: ChainResult | null = null;
   // 'auto' — 임무(부모 카드)에 매달린 카드일 때만 보고합니다 (카드 상세의 '실행' 버튼).

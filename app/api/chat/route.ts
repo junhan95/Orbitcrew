@@ -119,7 +119,9 @@ export async function POST(request: Request) {
     });
   } catch (error) {
       traceError('chat.failed', error);
-    return Response.json({ error: error instanceof Error ? error.message : '답변 생성에 실패했습니다.', userMessage }, { status: 502 });
+    const code = error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : undefined;
+    const status = error instanceof Error && 'status' in error && typeof error.status === 'number' ? error.status : 502;
+    return Response.json({ error: error instanceof Error ? error.message : '답변 생성에 실패했습니다.', userMessage, ...(code ? { code } : {}) }, { status });
   }
 }
 
