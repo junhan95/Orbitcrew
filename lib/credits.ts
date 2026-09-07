@@ -7,6 +7,7 @@ import {
 } from '@/lib/credits-pricing';
 import { ApiKeyMissingError, apiKeyMissingResponse, loadUserKey } from '@/lib/user-keys';
 import { atomicBatch } from '@/lib/atomic';
+import { ProviderCreditsError } from './provider-errors';
 
 // A model HTTP request is bounded to 180 seconds; crashed reservations expire conservatively.
 export const CREDIT_HOLD_TTL_MS = 5 * 60_000;
@@ -170,6 +171,7 @@ export function credentialErrorResponse(error: unknown, extra: Record<string, un
   if (error instanceof ApiKeyMissingError) return apiKeyMissingResponse(extra);
   if (error instanceof InsufficientCreditsError) return insufficientCreditsResponse(error.availableMc, extra);
   if (error instanceof BillingBusyError) return Response.json({ error: error.message, code: 'billing_busy', ...extra }, { status: 409 });
+  if (error instanceof ProviderCreditsError) return Response.json({ error: error.message, code: 'provider_credits', ...extra }, { status: 402 });
   return null;
 }
 

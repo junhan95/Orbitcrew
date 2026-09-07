@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowUpRight, BookOpen, Bot, Brain, ChartColumn, Check, ChevronDown, Flag, Inbox, LayoutDashboard, KeyRound, ListChecks, LogOut, MessageSquareText, PanelLeftClose, PanelLeftOpen, Plus, Search, Settings, Trash2, UserRound, Zap } from 'lucide-react';
+import { AlertTriangle, ArrowUpRight, BookOpen, Bot, Brain, ChartColumn, Check, ChevronDown, Flag, Inbox, LayoutDashboard, KeyRound, ListChecks, LogOut, MessageSquareText, PanelLeftClose, PanelLeftOpen, Plus, Search, Settings, Trash2, UserRound, Zap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
@@ -12,7 +12,7 @@ import { ApprovalsView, fetchInboxCount } from '@/components/approvals-view';
 import { HealthCard } from '@/components/health-card';
 import { MemoryView } from '@/components/memory-view';
 import { SkillsView } from '@/components/skills-view';
-import { type ApiKeyState, ApiKeyDialog, INSUFFICIENT_CREDITS_EVENT, NO_API_KEY_EVENT, fetchApiKeyState, installNoApiKeyWatcher } from '@/components/api-key-dialog';
+import { type ApiKeyState, ApiKeyDialog, INSUFFICIENT_CREDITS_EVENT, type InsufficientCreditsDetail, NO_API_KEY_EVENT, fetchApiKeyState, installNoApiKeyWatcher } from '@/components/api-key-dialog';
 import { OrbitMark } from '@/components/orbit-mark';
 import { WorkspaceView, type ChatTarget, type WorkspaceSection } from '@/components/workspace-views';
 import { PRIORITIES, type Priority, byPriority, toPriority } from '@/lib/priority';
@@ -85,6 +85,11 @@ function formatRelative(timestamp: number) {
   if (diff < 3_600_000) return tf('{0}분 전', Math.floor(diff / 60_000));
   if (diff < 86_400_000) return tf('{0}시간 전', Math.floor(diff / 3_600_000));
   return tf('{0}일 전', Math.floor(diff / 86_400_000));
+}
+
+/** 알림 문구가 실패·오류·부족을 알리는지 — 토스트 아이콘을 체크 대신 경고로 바꾸는 기준 (문구 자체는 각 화면이 정합니다). */
+function isProblemNotice(message: string): boolean {
+  return /실패|오류|부족|없습니다|못했|않습니다|만료|올바르지|error|failed|invalid|too low/i.test(message);
 }
 
 export default function Home() {
@@ -278,15 +283,16 @@ export default function Home() {
     goTo('계정');
   }, [flash, goTo]);
 
-  // 크레딧이 바닥나 402 가 돌아오면 안내하고 계정 화면(충전 · 키 연결)으로 보냅니다.
+  // 크레딧이 바닥나 대화가 막히면 충전 안내창을 띄웁니다 — orbitcrew 크레딧(충전 · 키 연결)과 본인 키 잔액(Anthropic 콘솔 충전 · 키 제거)을 구분해 안내.
+  const [creditsPrompt, setCreditsPrompt] = useState<InsufficientCreditsDetail | null>(null);
   useEffect(() => {
     const onEmpty = (event: Event) => {
-      flash((event as CustomEvent<string>).detail || t('크레딧 잔액이 부족합니다. 충전하거나 본인 API 키를 연결해 주세요.'));
-      goTo('계정');
+      const detail = (event as CustomEvent<InsufficientCreditsDetail | string>).detail;
+      setCreditsPrompt(typeof detail === 'string' ? { message: detail, cause: 'credits' } : (detail ?? { message: '', cause: 'credits' }));
     };
     window.addEventListener(INSUFFICIENT_CREDITS_EVENT, onEmpty);
     return () => window.removeEventListener(INSUFFICIENT_CREDITS_EVENT, onEmpty);
-  }, [flash, goTo]);
+  }, []);
 
   useEffect(() => {
     refreshInbox();
@@ -765,9 +771,33 @@ export default function Home() {
           <ApprovalsView onNotice={flash} onChanged={() => { refreshInbox(); void refreshTasks(); }} />
         </DialogContent>
       </Dialog>
-      {notice && prefs.toastNotifications && <output className="toast"><Check size={16} /> {notice}</output>}
+      {notice && prefs.toastNotifications && (isProblemNotice(notice)
+        ? <output className="toast problem" role="alert"><AlertTriangle size={16} /> {notice}</output>
+        : <output className="toast"><Check size={16} /> {notice}</output>)}
 
       <ApiKeyDialog onNotice={flash} onOpenChange={setApiKeyOpen} onSaved={setApiKeyState} open={apiKeyOpen} state={apiKeyState} />
+      <Dialog open={creditsPrompt !== null} onOpenChange={(open) => { if (!open) setCreditsPrompt(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{creditsPrompt?.cause === 'provider' ? t('Anthropic API 키 잔액이 부족합니다') : t('크레딧이 부족합니다')}</DialogTitle>
+            <DialogDescription>
+              {creditsPrompt?.message || t('크레딧 잔액이 부족합니다. 충전하거나 본인 API 키를 연결해 주세요.')}
+              {' '}{t('대화와 팀원 실행은 잔액이 생길 때까지 진행되지 않습니다.')}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            {creditsPrompt?.cause === 'provider'
+              ? <>
+                <Button variant="outline" onClick={() => { setCreditsPrompt(null); goTo('계정'); }}>{t('키를 지우고 크레딧으로 전환')}</Button>
+                <Button onClick={() => { window.open('https://console.anthropic.com/settings/billing', '_blank', 'noopener'); }}>{t('Anthropic 콘솔에서 충전')} <ArrowUpRight size={14} /></Button>
+              </>
+              : <>
+                <Button variant="outline" onClick={() => { setCreditsPrompt(null); setApiKeyOpen(true); }}>{t('본인 API 키 연결')}</Button>
+                <Button onClick={() => { setCreditsPrompt(null); goTo('계정'); }}>{t('크레딧 충전하기')}</Button>
+              </>}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={Boolean(selectedResult)} onOpenChange={(open) => !open && setSelectedResult(null)}>
         <DialogContent className="result-dialog">

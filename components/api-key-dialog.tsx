@@ -20,8 +20,12 @@ export async function fetchApiKeyState(): Promise<ApiKeyState> {
  * 화면 곳곳의 fetch 를 일일이 손대지 않으려고 window.fetch 를 한 겹 감쌉니다 (앱 셸에서 한 번만).
  */
 export const NO_API_KEY_EVENT = 'orbit:no-api-key';
-/** 402 { code: 'insufficient_credits' } — 크레딧이 바닥났을 때. detail 에 서버 메시지가 실립니다. */
+/**
+ * 402 { code: 'insufficient_credits' | 'provider_credits' } — 크레딧이 바닥났을 때. detail 은 { message, cause }:
+ * cause 'credits' 는 orbitcrew 크레딧, 'provider' 는 연결한 본인 키의 Anthropic 계정 잔액.
+ */
 export const INSUFFICIENT_CREDITS_EVENT = 'orbit:insufficient-credits';
+export type InsufficientCreditsDetail = { message: string; cause: 'credits' | 'provider' };
 let installed = false;
 export function installNoApiKeyWatcher() {
   if (installed || typeof window === 'undefined') return;
@@ -33,7 +37,10 @@ export function installNoApiKeyWatcher() {
       try {
         const data = await response.clone().json() as { code?: string; error?: string };
         if (data?.code === 'no_api_key') window.dispatchEvent(new CustomEvent(NO_API_KEY_EVENT));
-        if (data?.code === 'insufficient_credits') window.dispatchEvent(new CustomEvent(INSUFFICIENT_CREDITS_EVENT, { detail: data.error ?? '' }));
+        if (data?.code === 'insufficient_credits' || data?.code === 'provider_credits') {
+          const detail: InsufficientCreditsDetail = { message: data.error ?? '', cause: data.code === 'provider_credits' ? 'provider' : 'credits' };
+          window.dispatchEvent(new CustomEvent(INSUFFICIENT_CREDITS_EVENT, { detail }));
+        }
       } catch { /* JSON 이 아니면 우리 관심사가 아닙니다 */ }
     }
     return response;

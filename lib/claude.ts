@@ -8,6 +8,7 @@
  */
 import { providerFetch } from './provider-fetch';
 import { traceEvent } from './telemetry';
+import { toProviderError } from './provider-errors';
 const ANTHROPIC_ENDPOINT = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
 const WEB_SEARCH_TOOL = 'web_search_20250305';
@@ -352,7 +353,7 @@ async function streamOnce(request: RequestOptions, messages: ApiMessage[], onDel
   });
   if (!response.ok || !response.body) {
     const data = await response.json().catch(() => ({})) as MessagesResponse;
-    throw new Error(data.error?.message || `Claude API 호출에 실패했습니다. (HTTP ${response.status})`);
+    throw toProviderError(response.status, data.error?.message);
   }
   // 스트림 대신 완성 JSON 이 오면 그대로 씁니다 (fetch 모킹·중간 프록시).
   if ((response.headers.get('content-type') ?? '').includes('application/json')) {
@@ -411,7 +412,7 @@ async function streamOnce(request: RequestOptions, messages: ApiMessage[], onDel
         if (event.usage) usage = { ...usage, ...event.usage };
         break;
       case 'error':
-        throw new Error(event.error?.message || 'Claude 스트리밍 중 오류가 발생했습니다.');
+        throw toProviderError(0, event.error?.message || 'Claude 스트리밍 중 오류가 발생했습니다.');
       default:
         break;
     }

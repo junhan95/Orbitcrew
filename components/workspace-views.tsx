@@ -40,6 +40,7 @@ import {
   type ProfileField, type UserProfile, affiliationLine,
 } from '@/lib/profile';
 import { type Prefs, THEME_CHOICES, type ThemeChoice, updatePrefs, usePrefs } from '@/lib/prefs';
+import { INSUFFICIENT_CREDITS_EVENT } from '@/components/api-key-dialog';
 
 export type WorkspaceSection = '프로젝트' | '에이전트' | '대화' | '설정' | '계정';
 
@@ -2090,9 +2091,13 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
         setMessages((current) => current.filter((item) => item.id !== optimistic.id));
         setDraft(typed); setAttachments(sent);
       }
-      const busy = (error as { code?: string })?.code === 'billing_busy';
+      const code = (error as { code?: string })?.code;
+      const busy = code === 'billing_busy';
       tutorialEvent(busy ? 'billing-busy' : 'message-failed');
-      onNotice(error instanceof Error ? error.message : t("메시지를 보내지 못했습니다."));
+      if (code === 'insufficient_credits' || code === 'provider_credits') {
+        // 크레딧이 없어 대화가 막힌 경우 — 토스트 대신 충전 안내창을 띄웁니다 (app/page.tsx).
+        window.dispatchEvent(new CustomEvent(INSUFFICIENT_CREDITS_EVENT, { detail: { message: error instanceof Error ? error.message : '', cause: code === 'provider_credits' ? 'provider' : 'credits' } }));
+      } else onNotice(error instanceof Error ? error.message : t("메시지를 보내지 못했습니다."));
     }
     finally {
       sendingRef.current = false;

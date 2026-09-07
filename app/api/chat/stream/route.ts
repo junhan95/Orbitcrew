@@ -1,6 +1,6 @@
 import { chatCheckpoint } from '@/lib/chat-checkpoint';
 import { FILE_CHANGE_TOOL, validateFileChange, type FileChange } from '@/lib/ai-file-changes';
-import { BillingBusyError } from '@/lib/credits';
+import { BillingBusyError, InsufficientCreditsError } from '@/lib/credits';
 import { traceRequest, traceError } from '@/lib/telemetry';
 import { getCurrentUser } from '@/app/auth';
 import { getDatabase, getRuntimeConfig } from '@/db';
@@ -16,6 +16,7 @@ import { runInBackground, runMemoryReview } from '@/lib/memory-review';
 import { resolveAgentModel } from '@/lib/models';
 import { usageInsert } from '@/lib/usage';
 import { createMission, resolveMission, type MissionRow } from '@/lib/mission';
+import { ProviderCreditsError } from '@/lib/provider-errors';
 
 type ChatRow = { id: string; role: 'user' | 'assistant'; content: string; createdAt: number };
 
@@ -277,7 +278,7 @@ async function handlePOST(request: Request) {
           try { await checkpoint(assistantMessage.content); send({ type: 'partial', message: assistantMessage }); }
           catch (saveError) { traceError('chat.checkpoint_failed', saveError); }
         }
-        send({ type: 'error', error: error instanceof Error ? error.message : '답변 생성에 실패했습니다.', code: error instanceof BillingBusyError ? 'billing_busy' : undefined });
+        send({ type: 'error', error: error instanceof Error ? error.message : '답변 생성에 실패했습니다.', code: error instanceof BillingBusyError ? 'billing_busy' : error instanceof ProviderCreditsError ? 'provider_credits' : error instanceof InsufficientCreditsError ? 'insufficient_credits' : undefined });
       } finally {
         bridge.emit = undefined;
         try { controller.close(); } catch { /* Client disconnected; checkpoints remain saved. */ }
