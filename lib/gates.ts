@@ -6,7 +6,7 @@
  * 기록은 절대 요청을 실패시키지 않습니다 — 실패해도 조용히 넘어갑니다.
  */
 
-export type GateName = 'circuit_breaker' | 'recall_cap' | 'memory_threat' | 'skill_threat' | 'health_check' | 'approval';
+export type GateName = 'circuit_breaker' | 'recall_cap' | 'file_deliverable' | 'memory_threat' | 'skill_threat' | 'health_check' | 'approval';
 export type GateDecision = 'block' | 'allow' | 'ask' | 'raise' | 'noop';
 
 export type GateEvent = {

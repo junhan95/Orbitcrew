@@ -80,7 +80,12 @@ export const chatMessages = sqliteTable('chat_messages', {
   id: text('id').primaryKey(), userId: text('user_id').notNull(), projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
   agentId: text('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }), role: text('role').notNull(),
   content: text('content').notNull(), createdAt: integer('created_at').notNull(),
-}, (table) => [index('idx_chat_user_project_agent').on(table.userId, table.projectId, table.agentId, table.createdAt)]);
+  /** 스레드 = 임무 카드 id. NULL 은 스레드 없는 옛 일반 대화. */
+  taskId: text('task_id'),
+}, (table) => [
+  index('idx_chat_user_project_agent').on(table.userId, table.projectId, table.agentId, table.createdAt),
+  index('idx_chat_thread').on(table.userId, table.projectId, table.agentId, table.taskId, table.createdAt),
+]);
 
 /**
  * 대화 압축 요약 (Hermes compaction). 대화(프로젝트×에이전트)당 1행을 누적 갱신합니다.
@@ -94,7 +99,9 @@ export const chatSummaries = sqliteTable('chat_summaries', {
   messageCount: integer('message_count').notNull().default(0),
   coversFrom: integer('covers_from').notNull(), coversTo: integer('covers_to').notNull(),
   createdAt: integer('created_at').notNull(), updatedAt: integer('updated_at').notNull(),
-}, (table) => [uniqueIndex('uq_chat_summaries_conversation').on(table.userId, table.projectId, table.agentId)]);
+  /** 스레드(임무 카드 id). 일반 대화는 ''. */
+  taskId: text('task_id').notNull().default(''),
+}, (table) => [uniqueIndex('uq_chat_summaries_conversation').on(table.userId, table.projectId, table.agentId, table.taskId)]);
 
 /**
  * 절차적 기억 — 스킬 (Hermes skills). "이런 일은 이렇게 한다"를 이름+설명(인덱스)+본문으로 보관합니다.
@@ -353,3 +360,10 @@ export const transactionGuards = sqliteTable('transaction_guards', {
 export const runtimeLeases = sqliteTable('runtime_leases', {
   resourceKey: text('resource_key').primaryKey(), token: text('token').notNull(), expiresAt: integer('expires_at').notNull(),
 });
+
+/** 업무 산출물 파일의 서버 보관본 (lib/task-files). 브라우저 저장과 별개로 매니저·QA·'결과보기' 가 읽습니다. */
+export const taskFiles = sqliteTable('task_files', {
+  id: text('id').primaryKey(), userId: text('user_id').notNull(), taskId: text('task_id').notNull(), projectId: text('project_id'),
+  folderId: text('folder_id').notNull().default(''), path: text('path').notNull(), content: text('content').notNull(),
+  createdAt: integer('created_at').notNull(), updatedAt: integer('updated_at').notNull(),
+}, (table) => [uniqueIndex('uq_task_files').on(table.userId, table.taskId, table.path), index('idx_task_files_project').on(table.userId, table.projectId, table.updatedAt)]);

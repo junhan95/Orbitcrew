@@ -15,7 +15,7 @@ it('reports busy rather than asking to recharge when another request reserves th
   const { db, billing } = await setup(0, 1000);
   env.AUTH_MODE = 'oauth'; env.ANTHROPIC_API_KEY = 'test'; env.CREDIT_TRIAL_CREDITS = '0';
   await billing.beforeCall();
-  await expect(resolveCredential(db, 'u')).rejects.toMatchObject({ status: 409 });
+  await expect(resolveCredential(db, 'u', { waitMs: 0 })).rejects.toMatchObject({ status: 409 });
   await billing.afterCall();
   expect(await resolveCredential(db, 'u')).toBeInstanceOf(CreditBilling);
 });
@@ -27,7 +27,7 @@ async function setup(promo: number, paid: number) {
     ledgerInsert(db, { userId: 'u', kind: 'adjust', bucket: 'promo', amountMc: promo }),
     ledgerInsert(db, { userId: 'u', kind: 'adjust', bucket: 'paid', amountMc: paid }),
   ]);
-  const billing = new CreditBilling('test', db, 'u', await getBalance(db, 'u'), cfg);
+  const billing = new CreditBilling('test', db, 'u', await getBalance(db, 'u'), cfg, 0);
   return { ...database, billing };
 }
 
@@ -44,7 +44,7 @@ it('splits one call across remaining promo and paid credits', async () => {
 
 it('reserves the balance against concurrent calls and releases it on failure', async () => {
   const { db, billing } = await setup(1000, 1000);
-  const second = new CreditBilling('test', db, 'u', await getBalance(db, 'u'), cfg);
+  const second = new CreditBilling('test', db, 'u', await getBalance(db, 'u'), cfg, 0);
   const calls = await Promise.allSettled([billing.beforeCall(), second.beforeCall()]);
   expect(calls.filter((call) => call.status === 'fulfilled')).toHaveLength(1);
   expect((await getBalance(db, 'u')).availableMc).toBe(0);
@@ -69,7 +69,7 @@ it('recovers an expired crashed reservation without releasing a new one', async 
   const { db, sqlite, billing } = await setup(1000, 0);
   await billing.beforeCall();
   sqlite.exec('UPDATE credit_holds SET updated_at = 0');
-  const second = new CreditBilling('test', db, 'u', await getBalance(db, 'u'), cfg);
+  const second = new CreditBilling('test', db, 'u', await getBalance(db, 'u'), cfg, 0);
   await second.beforeCall();
   await billing.afterCall();
   expect((await getBalance(db, 'u')).availableMc).toBe(0);

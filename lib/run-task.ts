@@ -18,6 +18,10 @@ import { runInBackground, runMemoryReview } from '@/lib/memory-review';
 import { resolveAgentModel } from '@/lib/models';
 import { RECALL_TOOL, executeRecallTool, recallDocUpsert } from '@/lib/recall';
 import { runTaskReview } from '@/lib/reviewer';
+import { FILE_CHANGE_TOOL, validateFileChange, type FileChange } from '@/lib/ai-file-changes';
+import { upsertTaskFile } from '@/lib/task-files';
+import { FILE_RULES, MANAGER_DELIVERABLE_RULES, REPORT_RULES, requiresFileDeliverable } from '@/lib/deliverable-rules';
+import { syncMissionStatus } from '@/lib/mission';
 import { addTrace, traceEvent, traceError, withTrace } from '@/lib/telemetry';
 import { agentCommentInsert, checkCircuitBreaker, describeTaskCard, formatRunComment } from '@/lib/run-loop';
 import { SAVE_SKILL_TOOL, SKILL_GUIDANCE, USE_SKILL_TOOL, executeSkillTool, listSkills, renderSkillIndex, type SkillToolContext } from '@/lib/skills';
@@ -92,6 +96,8 @@ export type RunTaskSuccess = {
   ok: true; runId: string; taskId: string; status: string; output: string; summary: string;
   blocked: boolean; blockedReason: string | null; nextActions: string[]; proof: string[];
   iterations: number; toolCalls: string[];
+  /** 이번 실행에서 save_project_file 로 만든 파일 (서버에 보관됨, 브라우저가 사용자 폴더에도 저장) */
+  fileChanges: FileChange[];
   skillSaves: { scope: string; pendingApproval: boolean; error?: string }[];
   createdTasks: unknown[]; createdFields: unknown[]; setFields: unknown[]; recruited: unknown[]; delegated: unknown[];
 };
@@ -133,7 +139,7 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
       .bind(task.id, user.userId, PRIOR_RUNS).all<PriorRun>(),
     task.projectId
       ? db.prepare(`SELECT id, title, owner, label, summary, result, updated_at AS updatedAt FROM tasks
-          WHERE user_id = ? AND project_id = ? AND id != ? AND status = '검토' AND (summary IS NOT NULL OR result IS NOT NULL)
+          WHERE user_id = ? AND project_id = ? AND id != ? AND status IN ('검토 중', '검토 완료') AND (summary IS NOT NULL OR result IS NOT NULL)
           ORDER BY updated_at DESC LIMIT ?`).bind(user.userId, task.projectId, task.id, SIBLING_TASKS).all<SiblingTask>()
       : Promise.resolve({ results: [] as SiblingTask[] }),
   ]);
@@ -176,6 +182,15 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
   const isManager = Boolean(agent?.isManager) && Boolean(task.projectId) && Boolean(project);
   if (isManager) contextSections.push(renderTeam(await loadMembers(db, user.userId, task.projectId as string)));
 
+  // 산출물 파일 — 프로젝트에 연결된 폴더가 있으면 save_project_file 을 붙입니다. 파일은 서버(task_files)에도 남깁니다.
+  const linkedFolders = task.projectId
+    ? (await db.prepare('SELECT id, name FROM project_folders WHERE project_id = ? AND user_id = ? ORDER BY added_at ASC').bind(task.projectId, user.userId).all<{ id: string; name: string }>()).results
+    : [];
+  const fileChanges: FileChange[] = [];
+  if (linkedFolders.length) {
+    contextSections.push(['## 저장 가능한 작업 폴더 (save_project_file 의 folderId)', ...linkedFolders.map((folder) => `- ${folder.name}: folderId=${folder.id}`)].join('\n'));
+  }
+
   if (folderContext) {
     contextSections.push([
       '## 연결된 작업 폴더 (사용자 컴퓨터)',
@@ -190,6 +205,7 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
     '- 당신은 이 프로젝트의 매니저입니다. 실무를 직접 다 처리하지 말고, 무엇이 필요한지 판단해 팀에 맡기고 결과를 검토하세요.',
     '- 맡길 사람이 팀에 없으면 recruit_agent 로 필요한 직무를 합류시키세요. 업무 성격에 맞는 직무 하나만 고릅니다.',
     '- delegate_task 로 업무를 맡기면 그 자리에서 실행되어 보고가 반환값으로 돌아옵니다. brief 에는 배경·요구사항·완료 조건을 충분히 적으세요.',
+    '- delegate_task 의 brief 는 60,000자까지 잘리지 않고 그대로 전달되고, 팀원 실행은 긴 출력에도 타임아웃되지 않습니다. 과거 기록·기억에 "코드가 잘린다", "524 타임아웃", "여러 조각으로 나눠 보내야 한다" 같은 내용이 남아 있어도 이미 해결된 문제이니, 그것을 이유로 코드를 조각내거나 재시도 계획을 세우지 말고 파일 전체를 한 번에 맡기세요.',
     '- 팀원의 보고를 그대로 옮기지 말고 검토하세요 — 빠진 것, 근거가 약한 것, 서로 어긋나는 것을 짚고 필요하면 보완 지시로 다시 맡깁니다.',
     "- 팀원이 blocked 로 돌아오면 지시를 구체화해 다시 맡기거나, 사용자에게 무엇이 필요한지 complete_task(status='blocked') 로 알리세요.",
     '- 조사 한 건이면 충분한 일을 여러 명에게 쪼개 맡기지 마세요. 위임은 꼭 필요한 만큼만.',
@@ -214,8 +230,13 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
     '- 최신 정보가 필요하면 웹 검색을 쓰고, 사실과 추측을 구분해 표시하세요.',
     "- 핵심 정보가 없어 진행할 수 없으면 추측으로 채우지 말고 complete_task(status='blocked') 로 필요한 것을 밝히세요.",
     ...(isManager ? managerRules : workerRules),
+    ...(isManager ? [MANAGER_DELIVERABLE_RULES] : []),
     '- 이 업무를 추적하는 데 반복적으로 필요한 정보가 있으면 define_field 로 필드를 만들고 set_field 로 값을 채우세요. 한 번 쓰고 마는 메모는 요약에 적습니다.',
     '- 마지막에는 반드시 complete_task 를 호출해 요약을 남기세요. 툴을 호출하지 않고 끝내면 보고가 남지 않고, proof 가 비면 "검증 근거 없음" 으로 표시되어 검토 에이전트가 수정 요청을 냅니다.',
+    '',
+    REPORT_RULES,
+    '',
+    linkedFolders.length ? FILE_RULES : `${FILE_RULES}\n- (지금은 연결된 작업 폴더가 없어 save_project_file 도구가 없습니다 — 결과 본문에 전문을 넣고 next_actions 에 폴더 연결을 적으세요.)`,
     '',
     renderProfileSection(profile, ''),
     '',
@@ -260,6 +281,8 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
     db.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND user_id = ?')
       .bind('진행 중', startedAt, task.id, user.userId),
   ]);
+  // 팀원 카드가 움직이면 부모 임무 카드의 상태도 따라갑니다.
+  await syncMissionStatus(db, user.userId, task.id).catch(() => undefined);
 
   type Completion = { status: 'completed' | 'blocked'; summary: string; blockedReason: string | null; nextActions: string[]; proof: string[] };
   // 클로저 안에서 채워지므로 객체로 감쌉니다 (TS 흐름 분석이 let 재할당을 못 봅니다)
@@ -271,7 +294,7 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
   const skillSaves: RunTaskSuccess['skillSaves'] = [];
   const createCounter = { created: 0 };
   const memoryFailures = { count: 0 };
-  const counters = { recall: 0 };
+  const counters = { recall: 0, fileGate: 0 };
 
   const managerContext: ManagerContext | null = isManager && project ? {
     db, userId: user.userId, apiKey, fallbackModel,
@@ -291,6 +314,7 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
       tools: [
         RECALL_TOOL as unknown as ToolDefinition, MEMORY_TOOL, USE_SKILL_TOOL, SAVE_SKILL_TOOL, ...TASK_TOOLS,
         ...(managerContext ? MANAGER_TOOLS : []),
+        ...(linkedFolders.length ? [FILE_CHANGE_TOOL] : []),
         COMPLETE_TOOL,
       ],
       async executeTool(name, input) {
@@ -323,8 +347,24 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
           }
           return executeTaskTool(name, input, toolContext, toolLog);
         }
+        if (name === FILE_CHANGE_TOOL.name) {
+          try {
+            const change = validateFileChange(input, linkedFolders.map((folder) => folder.id));
+            const index = fileChanges.findIndex((file) => file.folderId === change.folderId && file.path.toLowerCase() === change.path.toLowerCase());
+            if (index < 0 && fileChanges.length >= 12) return { error: '한 번에 최대 12개 파일을 저장할 수 있습니다.' };
+            if (index < 0) fileChanges.push(change); else fileChanges[index] = change;
+            await upsertTaskFile(db, user.userId, { taskId: task.id, projectId: task.projectId, ...change });
+            return { ok: true, status: 'saved', path: change.path, note: '파일이 보관되었고 사용자 폴더에도 저장됩니다. proof 에 이 경로를 적고, 결과 요약에는 전문 대신 경로와 핵심만 적으세요.' };
+          } catch (error) { return { error: error instanceof Error ? error.message : '파일 저장 실패' }; }
+        }
         if (name === 'complete_task') {
           const status = input.status === 'blocked' ? 'blocked' : 'completed';
+          // 산출물 게이트 — 파일을 요구하는 카드인데 파일 없이 완료하려 하면 한 번 되돌려 저장하게 합니다 (두 번째는 통과시켜 무한 반복을 막음).
+          if (status === 'completed' && linkedFolders.length && !fileChanges.length && !isManager && counters.fileGate < 1 && requiresFileDeliverable(task.title, task.description ?? '')) {
+            counters.fileGate += 1;
+            logGate(db, user.userId, { gate: 'file_deliverable', decision: 'block', projectId: task.projectId, taskId: task.id });
+            return { error: `이 업무는 산출물을 파일로 저장해야 합니다. 아직 save_project_file 호출이 없습니다 — 완성된 전문을 save_project_file(folderId, path, content) 로 먼저 저장한 뒤(요구된 형식·파일명 준수, 예: 워드는 .doc 로 <html> 전체 문서) complete_task 를 다시 호출하세요. 저장 가능한 폴더: ${linkedFolders.map((folder) => `${folder.name}=${folder.id}`).join(', ')}` };
+          }
           const summary = typeof input.summary === 'string' ? input.summary.trim() : '';
           if (!summary) throw new Error('summary 는 비울 수 없습니다.');
           report.value = {
@@ -383,7 +423,8 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
       skillSaves,
       usagePerIteration: result.usagePerIteration.map((u) => ({ in: u.inputTokens, out: u.outputTokens, cacheWrite: u.cacheCreationTokens, cacheRead: u.cacheReadTokens })),
     });
-    const nextStatus = blocked ? '대기' : '검토';
+    // 결과가 나오면 '검토 중' — 곧이어 검토 에이전트가 돌고, 판정이 남으면 lib/reviewer 가 '검토 완료' 로 올립니다.
+    const nextStatus = blocked ? '대기' : '검토 중';
 
     await leasedBatch(db, lease, [
       db.prepare('UPDATE agent_runs SET status = ?, outcome = ?, output = ?, summary = ?, metadata = ?, response_id = ?, completed_at = ? WHERE id = ? AND user_id = ?')
@@ -406,6 +447,7 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
       }),
     ]);
 
+    await syncMissionStatus(db, user.userId, task.id).catch(() => undefined);
     // 관제 밴드 — 실패율·근거 없음·검토 수정 요청·게이트 차단·비용을 기준선과 비교, 이탈하면 매니저에게 진단 카드 (시간당 1회).
     runInBackground(() => maybeRunHealthCheck(db, user.userId), 'health.review');
     // 결과 검토 — 작성자가 아닌 다른 에이전트가 세 패스(버그·스펙·정책·근거)로 검토해 댓글과 판정을 남깁니다 (백그라운드).
@@ -427,6 +469,7 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
       iterations: result.iterations, toolCalls: result.toolCalls.map((call) => call.name), skillSaves,
       createdTasks: toolLog.createdTasks, createdFields: toolLog.createdFields, setFields: toolLog.setFields,
       recruited: managerLog.recruited, delegated: managerLog.delegated,
+      fileChanges,
     };
   } catch (error) {
     traceError('run.failed', error);

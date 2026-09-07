@@ -13,6 +13,8 @@ import type { ClaudeCredential, ToolDefinition } from '@/lib/claude';
 import { runTask } from '@/lib/run-task';
 import { type Priority, toPriority } from '@/lib/priority';
 import { recallDocUpsert } from '@/lib/recall';
+import { syncMissionStatus } from '@/lib/mission';
+import { listTaskFiles } from '@/lib/task-files';
 
 export const MAX_RECRUITS = 4;
 export const MAX_DELEGATIONS = 4;
@@ -45,6 +47,7 @@ export const DELEGATE_TOOL: ToolDefinition = {
   description: [
     '팀원에게 업무를 맡기고 결과 보고를 받습니다. 카드가 보드에 만들어지고 그 자리에서 실행됩니다.',
     'brief 에는 맡을 사람이 이것만 읽고 시작할 수 있도록 배경·요구사항·완료 조건을 충분히 적으세요.',
+    '산출물이 있는 업무면 파일명·형식·저장 폴더와 "결과는 파일로 저장하고 요약만 보고" 를 brief 에 명시하세요.',
     '결과는 이 호출의 반환값으로 돌아옵니다 — 받아서 검토한 뒤 사용자에게 보고하세요.',
     `한 번의 실행에서 최대 ${MAX_DELEGATIONS}건까지 위임할 수 있습니다. 같은 일을 두 번 맡기지 마세요.`,
   ].join(' '),
@@ -61,8 +64,29 @@ export const DELEGATE_TOOL: ToolDefinition = {
   },
 };
 
+/**
+ * 팀원이 끝낸 업무의 결과 전문을 읽습니다.
+ * 대화의 '📥 보고' 는 요약뿐이라, 매니저가 검토·재위임 brief 작성에 전문이 필요할 때 씁니다
+ * (예전엔 회상 발췌만 보여 "본문이 잘렸다"고 오해했습니다).
+ */
+export const READ_TASK_TOOL: ToolDefinition = {
+  name: 'read_task_result',
+  description: [
+    '이 프로젝트 보드에 있는 업무 카드의 결과 전문을 읽습니다.',
+    "대화의 '📥 보고' 메시지는 요약이므로, 팀원 결과를 검토하거나 그 내용을 다른 팀원에게 넘길 때는 이 도구로 전문을 먼저 읽으세요.",
+    "task_id 는 보고 메시지의 링크(#task/<id>)나 delegate_task 반환값에 있습니다. 모르면 title 로 찾습니다.",
+  ].join(' '),
+  input_schema: {
+    type: 'object',
+    properties: {
+      task_id: { type: 'string', description: '업무 카드 id (우선)' },
+      title: { type: 'string', description: 'id 를 모를 때 제목(일부 일치)' },
+    },
+  },
+};
+
 export const MANAGER_TOOLS: ToolDefinition[] = [RECRUIT_TOOL, DELEGATE_TOOL];
-export const MANAGER_TOOL_NAMES = new Set(MANAGER_TOOLS.map((tool) => tool.name));
+export const MANAGER_TOOL_NAMES = new Set([...MANAGER_TOOLS, READ_TASK_TOOL].map((tool) => tool.name));
 
 /**
  * 매니저가 일하는 도중 밖으로 흘려보내는 진행 이벤트.
@@ -72,6 +96,7 @@ export const MANAGER_TOOL_NAMES = new Set(MANAGER_TOOLS.map((tool) => tool.name)
 export type ManagerEvent =
   | { kind: 'recruited'; agent: string; role: string }
   | { kind: 'delegate_start'; agent: string; role: string; title: string }
+  | { kind: 'delegate_queued'; agent: string; role: string; title: string; taskId: string }
   | { kind: 'delegate_done'; agent: string; title: string; taskId: string; outcome: 'completed' | 'blocked'; summary: string };
 
 export type ManagerContext = {
@@ -89,6 +114,11 @@ export type ManagerContext = {
   folderContext: string;
   /** 진행 이벤트 구독자 (스트리밍 대화용). 없으면 아무 데도 흘리지 않습니다. */
   onEvent?: (event: ManagerEvent) => void;
+  /**
+   * true 면 delegate_task 가 카드만 만들고 바로 돌아옵니다 (실행은 브라우저가 /api/agents/run 으로 따로 시작, 결과는 대화에 보고로 도착).
+   * 대화 모드가 이렇게 동작해 매니저가 "맡겼습니다" 하고 곧장 대화 가능 상태로 돌아옵니다. 카드 실행(부모 카드가 있는 경우)은 동기 위임 그대로.
+   */
+  asyncDelegation?: boolean;
 };
 
 export type ManagerLog = {
@@ -128,22 +158,27 @@ function clip(text: string | null | undefined, max: number): string {
  * 하위 에이전트 한 명을 실제로 실행합니다.
  * 카드 생성 → 실행 → 카드/실행기록/댓글/사용량/회상 저장까지 끝내고 매니저에게 줄 보고를 돌려줍니다.
  */
-async function runWorker(context: ManagerContext, member: MemberRow, params: { title: string; brief: string; label: string; priority: Priority }) {
+/** 위임 카드를 만듭니다. 실행은 /api/agents/run 과 같은 코어(lib/run-task.ts)가 맡습니다 — 기억·회상·스킬·검증·관제·승인 게이트가 똑같이 적용되도록. */
+async function createWorkerCard(context: ManagerContext, member: MemberRow, params: { title: string; brief: string; label: string; priority: Priority }, status: '진행 중' | '대기') {
   const { db, userId } = context;
   const now = Date.now();
   const taskId = crypto.randomUUID();
-
-  // 카드를 만들고, 실행은 /api/agents/run 과 같은 코어(lib/run-task.ts)에 맡깁니다.
-  // 그래야 위임 실행에도 기억·회상·스킬·검증 근거·검토·관제·승인 게이트가 똑같이 적용됩니다.
   await db.batch([
     db.prepare(`INSERT INTO tasks (id, user_id, title, label, owner, status, priority, accent, project_id, description, parent_task_id, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(taskId, userId, params.title, params.label, member.name, '진행 중', params.priority, member.color, context.projectId, params.brief, context.managerTaskId, now, now),
+      .bind(taskId, userId, params.title, params.label, member.name, status, params.priority, member.color, context.projectId, params.brief, context.managerTaskId, now, now),
     recallDocUpsert(db, {
       userId, kind: 'task', refId: taskId, projectId: context.projectId, agentName: member.name, title: params.title,
       content: `[${params.label}] ${params.title} — 담당 ${member.name} (${context.managerName} 위임)\n${params.brief}`, createdAt: now,
     }),
   ]);
+  if (context.managerTaskId) await syncMissionStatus(db, userId, taskId);
+  return taskId;
+}
+
+async function runWorker(context: ManagerContext, member: MemberRow, params: { title: string; brief: string; label: string; priority: Priority }) {
+  const { db, userId } = context;
+  const taskId = await createWorkerCard(context, member, params, '진행 중');
 
   const outcome = await runTask({
     db, userId, taskId, apiKey: context.apiKey, fallbackModel: context.fallbackModel,
@@ -191,6 +226,31 @@ export async function executeManagerTool(
     return { ok: true, agent_name: agentName, role: role.role, note: '팀에 합류했습니다. delegate_task 로 업무를 맡기세요.' };
   }
 
+  if (name === 'read_task_result') {
+    const taskId = typeof input.task_id === 'string' ? input.task_id.trim() : '';
+    const title = typeof input.title === 'string' ? input.title.trim() : '';
+    if (!taskId && !title) return { ok: false, error: 'task_id 또는 title 을 주세요.' };
+    type TaskRow = { id: string; title: string; owner: string; status: string; summary: string | null; result: string | null; blockedReason: string | null; description: string };
+    const row = taskId
+      ? await db.prepare('SELECT id, title, owner, status, summary, result, blocked_reason AS blockedReason, description FROM tasks WHERE id = ? AND user_id = ? AND project_id = ?')
+        .bind(taskId, userId, projectId).first<TaskRow>()
+      : await db.prepare('SELECT id, title, owner, status, summary, result, blocked_reason AS blockedReason, description FROM tasks WHERE user_id = ? AND project_id = ? AND title LIKE ? ORDER BY updated_at DESC LIMIT 1')
+        .bind(userId, projectId, `%${title}%`).first<TaskRow>();
+    if (!row) return { ok: false, error: '그런 업무 카드가 이 프로젝트에 없습니다.' };
+    const files = await listTaskFiles(db, userId, row.id);
+    return {
+      ok: true,
+      task_id: row.id, title: row.title, agent: row.owner, status: row.status,
+      summary: row.summary ?? '',
+      blocked_reason: row.blockedReason ?? undefined,
+      result: row.result ? clip(row.result, REPORT_CLIP) : '',
+      files: files.map((file) => ({ path: file.path, folder_id: file.folderId, content: clip(file.content, 30_000) })),
+      note: files.length
+        ? '팀원이 저장한 산출물 파일(files)과 결과 요약입니다. 검토를 맡길 때는 files 의 내용을 brief 에 그대로 넣으세요.'
+        : row.result ? '결과 전문입니다 (잘리지 않았으면 끝까지 그대로입니다). 산출물 파일은 없습니다 — 파일이 필요하면 파일로 저장하도록 다시 맡기세요.' : '아직 결과가 없습니다 — 팀원이 진행 중이거나 시작 전입니다.',
+    };
+  }
+
   if (name === 'delegate_task') {
     if (log.delegated.length >= MAX_DELEGATIONS) {
       return { ok: false, error: `이번 실행에서는 ${MAX_DELEGATIONS}건까지만 위임할 수 있습니다. 남은 것은 보고에 다음 단계로 적으세요.` };
@@ -219,6 +279,19 @@ export async function executeManagerTool(
 
     const label = typeof input.label === 'string' && input.label.trim() ? input.label.trim().slice(0, 20) : member.role.slice(0, 20);
     const priority = toPriority(input.priority);
+    if (context.asyncDelegation) {
+      // 대화 위임: 카드만 만들고 바로 돌아갑니다. 실행 시작은 브라우저가, 결과 보고는 lib/manager-report 가 대화에 남깁니다.
+      const taskId = await createWorkerCard(context, member, { title, brief, label, priority }, '대기');
+      log.delegated.push({ taskId, title, agent: member.name, outcome: 'queued', summary: '' });
+      context.onEvent?.({ kind: 'delegate_queued', agent: member.name, role: member.role, title, taskId });
+      return {
+        ok: true,
+        task_id: taskId,
+        agent: member.name,
+        status: 'queued',
+        note: `${member.name} 에게 맡겼고 실행이 곧 시작됩니다. 결과는 팀원이 끝나는 대로 이 대화에 '📥 보고' 메시지로 도착합니다. 지금은 결과를 기다리거나 추측하지 말고, 누구에게 무엇을 맡겼는지 사용자에게 알린 뒤 답변을 끝내세요.`,
+      };
+    }
     // 하위 실행은 수십 초가 걸립니다 — 시작을 먼저 알려 화면이 멈춘 것처럼 보이지 않게 합니다.
     context.onEvent?.({ kind: 'delegate_start', agent: member.name, role: member.role, title });
     const result = await runWorker(context, member, { title, brief, label, priority });

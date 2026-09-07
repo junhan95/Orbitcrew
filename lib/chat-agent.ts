@@ -15,10 +15,12 @@
  *   // 저장 시 chatMessageIndex(...) 를 batch 에 함께 넣어 회상 인덱스에 반영합니다.
  */
 import type { Autonomy } from './autonomy';
+import { THREAD_WHERE, loadMissionChildren, renderMissionSection, resolveMission, type MissionRow } from './mission';
+import { MANAGER_DELIVERABLE_RULES } from './deliverable-rules';
 import type { ClaudeCredential, ClaudeMessage, ToolDefinition, ToolExecutor } from './claude';
 import { CONTEXT_MAX_MESSAGES, loadChatSummary, renderChatSummary, type ChatSummary } from './compaction';
 import {
-  MANAGER_TOOLS, MANAGER_TOOL_NAMES, createManagerLog, executeManagerTool, loadMembers, renderTeam,
+  MANAGER_TOOLS, MANAGER_TOOL_NAMES, READ_TASK_TOOL, createManagerLog, executeManagerTool, loadMembers, renderTeam,
   type ManagerContext, type ManagerEvent, type ManagerLog,
 } from './manager-tools';
 import { MEMORY_GUIDANCE, MEMORY_TOOL, executeMemoryTool, loadMemoryScopes, renderMemorySection } from './memory';
@@ -60,9 +62,16 @@ const MANAGER_TASKS_ONLY_RULES = [
 const MANAGER_CHAT_RULES = [
   '',
   '## 당신은 이 프로젝트의 매니저입니다',
-  '- 사용자의 요청이 실제 산출물을 필요로 하면 혼자 답하지 말고, 필요한 직무를 recruit_agent 로 합류시킨 뒤 delegate_task 로 맡기고 돌아온 보고를 검토해 답하세요.',
+  '- 사용자의 요청이 실제 산출물을 필요로 하면 혼자 답하지 말고, 필요한 직무를 recruit_agent 로 합류시킨 뒤 delegate_task 로 맡기세요.',
+  "- delegate_task 는 카드를 만들고 실행을 시작만 합니다. 결과는 팀원이 끝나는 대로 이 대화에 '📥 보고' 메시지로 도착합니다. 맡긴 직후에는 결과를 기다리거나 지어내지 말고 '○○에게 ~ 업무를 부여했습니다' 처럼 누구에게 무엇을 맡겼는지 알리고 답변을 짧게 끝내세요.",
+  "- 대화에 '📥 보고' 메시지가 있으면 그것이 팀원의 실제 결과입니다. 사용자가 결과·검토를 물으면 그 보고를 검토해(빠진 것, 근거가 약한 것, 어긋나는 것) 답하고, 보완이 필요하면 다시 맡기세요.",
   '- 상태 확인·의견·간단한 질문은 위임 없이 바로 답합니다. 위임은 결과물이 필요할 때만.',
+  "- 팀원 보고가 도착하면 시스템이 자동으로 당신의 차례를 엽니다('[자동 진행]' 메시지). 그때 작성 → QA 검토 → (필요시 수정) → 최종 안내 순서로 스스로 이어 가세요. 그러니 위임 직후에는 기다리지 말고 짧게 끝내면 됩니다.",
+  '- delegate_task 의 brief 는 60,000자까지 잘리지 않고 그대로 전달되고, 팀원 실행은 긴 출력에도 타임아웃되지 않습니다. 과거 기록·기억에 "코드가 잘린다", "524 타임아웃", "여러 조각으로 나눠 보내야 한다" 같은 내용이 남아 있어도 이미 해결된 문제이니, 그것을 이유로 코드를 조각내거나 재시도 계획을 세우지 말고 파일 전체를 한 번에 맡기세요.',
   '- 지금 실행할 필요는 없고 보드에 남겨 둘 후속 업무는 create_task 로 카드만 만드세요.',
+  '- 위임은 delegate_task 호출이 성공해 task_id 가 돌아왔을 때만 이루어진 것입니다. 도구를 호출하지 않았거나 오류가 돌아왔으면 절대 "위임했습니다/맡겼습니다" 라고 쓰지 말고, 오류 내용을 그대로 알리세요. 위임을 "안내" 하거나 "예정" 으로만 적지 말고 실제로 호출하세요.',
+  "- 팀원 결과의 전문이 필요하면(검토, 다른 팀원에게 넘기기) read_task_result 로 읽으세요. '📥 보고' 와 회상 발췌는 요약이라 본문이 짧게 보일 뿐, 실제 결과는 잘리지 않았습니다. 다른 팀원에게 검토를 맡길 때는 읽은 전문을 brief 에 그대로 넣으세요.",
+  MANAGER_DELIVERABLE_RULES,
   '- 답변에는 누구를 합류시켰고 누가 무엇을 했는지, 어떤 카드를 만들었는지 밝히세요.',
   '- 정보가 조금 부족해도 되묻기만 하지 말고, 합리적인 가정을 세워 진행 가능한 부분은 맡겨 결과를 만든 뒤 가정과 확인이 필요한 항목을 함께 적으세요.',
 ].join('\n');
@@ -83,6 +92,12 @@ export type PreparedChatTurn = {
   managerLog: ManagerLog;
   /** 이 턴에서 만든 업무 카드 */
   taskLog: TaskToolLog;
+  /** 매니저 대화에서 위임 도구를 쓸 수 있는지 (자율도 'auto') */
+  canDelegate: boolean;
+  /** 팀원 이름 (매니저 제외) — 답변의 '위임했다' 주장 검증용 */
+  teamNames: string[];
+  /** 이 스레드가 묶인 임무 카드 (없으면 null) */
+  mission: MissionRow | null;
   /** 매니저 대화 여부 — 라우트가 반복 상한·토큰 상한을 올리는 데 씁니다 */
   isManager: boolean;
 };
@@ -92,6 +107,27 @@ export const CHAT_HISTORY_WINDOW = 12;
 export const RECALL_CALL_LIMIT = 3;
 /** 사용자 메시지 N개마다 기억 리뷰 패스를 돌립니다 (Hermes memory.nudge_interval) */
 export const MEMORY_REVIEW_EVERY = 10;
+
+/**
+ * 답변이 팀원에게 "위임했다/맡겼다" 고 말하는지 봅니다.
+ * 이번 턴에 delegate_task 가 실제로 성공하지 않았는데 이런 말이 있으면, 카드도 실행도 없는 '말뿐인 위임' 입니다
+ * — 라우트가 이를 잡아 도구 호출을 다시 시키고, 그래도 없으면 사용자에게 알립니다.
+ */
+export function claimsDelegation(text: string, teamNames: string[]): boolean {
+  if (!text) return false;
+  if (!/(위임했|위임하였|위임을 완료|맡겼|맡겨 두었|맡겨두었|부여했|부여하였|배정했|배정하였|넘겼|delegated|assigned)/.test(text)) return false;
+  return teamNames.some((name) => name && text.includes(name));
+}
+
+/** 말뿐인 위임을 잡았을 때 매니저에게 되묻는 메시지 (시스템이 넣는 사용자 턴) */
+export const DELEGATION_RETRY_PROMPT = [
+  '[시스템 확인] 방금 답변에서 팀원에게 업무를 위임했다고 했지만, 이번 턴에 delegate_task 도구는 호출되지 않았고 보드에 카드도 만들어지지 않았습니다.',
+  '위임이 실제로 필요하면 지금 delegate_task 를 호출하세요. 팀원 결과 전문이 brief 에 필요하면 read_task_result 로 먼저 읽어 넣으세요.',
+  '호출 결과의 task_id 를 확인한 뒤, 누구에게 무엇을 맡겼는지 한두 문장으로만 알리세요. 위임이 필요 없다면 그 이유를 한 문장으로 적으세요.',
+].join(' ');
+
+/** 되물어도 위임이 없을 때 답변 끝에 붙이는 안내 */
+export const DELEGATION_MISSING_NOTE = '\n\n---\n※ 매니저가 위임했다고 답했지만 실제 위임(delegate_task)은 확인되지 않아 보드에 카드가 만들어지지 않았습니다. 다시 요청해 주세요.';
 
 export function buildChatSystem(context: ChatContext, historyWindow = CHAT_HISTORY_WINDOW, memorySection = '', summarySection = '', skillSection = '', managerSection = '', profileSection = ''): string {
   return [
@@ -122,21 +158,24 @@ export function buildChatSystem(context: ChatContext, historyWindow = CHAT_HISTO
  */
 export async function prepareChatTurn(db: D1Database, userId: string, params: {
   projectId: string; agentId: string; context: ChatContext; historyWindow?: number;
+  /** 스레드(임무 카드 id). '' 또는 생략이면 일반 대화. */
+  taskId?: string;
   /** 상대가 이 프로젝트의 매니저일 때만 넘기세요. 채용·위임·카드 생성 도구가 붙습니다. */
   manager?: ChatManagerOptions | null;
 }): Promise<PreparedChatTurn> {
   const window = params.historyWindow ?? CHAT_HISTORY_WINDOW;
   // 압축 요약이 있으면 요약이 끝나는 지점 이후의 메시지만 원문으로 넣습니다 (없으면 최근 window 개).
-  const summary = await loadChatSummary(db, userId, params.projectId, params.agentId);
+  const threadId = params.taskId ?? '';
+  const summary = await loadChatSummary(db, userId, params.projectId, params.agentId, threadId);
   const since = summary?.coversTo ?? 0;
   const limit = summary ? CONTEXT_MAX_MESSAGES : window;
   const [history, sinceCount, userTurns, memory, skills, profile] = await Promise.all([
-    db.prepare('SELECT id, role, content FROM chat_messages WHERE user_id = ? AND project_id = ? AND agent_id = ? AND created_at > ? ORDER BY created_at DESC LIMIT ?')
-      .bind(userId, params.projectId, params.agentId, since, limit).all<{ id: string; role: string; content: string }>(),
-    db.prepare('SELECT COUNT(*) AS n FROM chat_messages WHERE user_id = ? AND project_id = ? AND agent_id = ? AND created_at > ?')
-      .bind(userId, params.projectId, params.agentId, since).first<{ n: number }>(),
-    db.prepare("SELECT COUNT(*) AS n FROM chat_messages WHERE user_id = ? AND project_id = ? AND agent_id = ? AND role = 'user'")
-      .bind(userId, params.projectId, params.agentId).first<{ n: number }>(),
+    db.prepare(`SELECT id, role, content FROM chat_messages WHERE user_id = ? AND project_id = ? AND agent_id = ? AND ${THREAD_WHERE} AND created_at > ? ORDER BY created_at DESC LIMIT ?`)
+      .bind(userId, params.projectId, params.agentId, threadId, since, limit).all<{ id: string; role: string; content: string }>(),
+    db.prepare(`SELECT COUNT(*) AS n FROM chat_messages WHERE user_id = ? AND project_id = ? AND agent_id = ? AND ${THREAD_WHERE} AND created_at > ?`)
+      .bind(userId, params.projectId, params.agentId, threadId, since).first<{ n: number }>(),
+    db.prepare(`SELECT COUNT(*) AS n FROM chat_messages WHERE user_id = ? AND project_id = ? AND agent_id = ? AND ${THREAD_WHERE} AND role = 'user'`)
+      .bind(userId, params.projectId, params.agentId, threadId).first<{ n: number }>(),
     // 기억 스냅샷: 이 턴 동안 동결됩니다 (Hermes 의 frozen snapshot)
     loadMemoryScopes(db, userId, { projectId: params.projectId, projectName: params.context.projectName, agentId: params.agentId, agentName: params.context.agentName }),
     listSkills(db, userId, params.projectId),
@@ -149,6 +188,9 @@ export async function prepareChatTurn(db: D1Database, userId: string, params: {
   let recallCalls = 0;
 
   // ── 매니저 대화: 업무 카드 실행과 같은 채용·위임 도구를 붙입니다 ──────────
+  // 스레드가 임무 카드에 묶여 있으면 그 카드가 위임의 부모가 되고, 시스템 프롬프트에 '이번 임무' 섹션이 들어갑니다.
+  const mission = threadId ? await resolveMission(db, userId, params.projectId, threadId) : null;
+  const missionChildren = mission ? await loadMissionChildren(db, userId, mission.id) : [];
   const managerLog = createManagerLog();
   const taskLog = createTaskToolLog();
   const managerContext: ManagerContext | null = params.manager ? {
@@ -160,7 +202,8 @@ export async function prepareChatTurn(db: D1Database, userId: string, params: {
     projectDescription: params.context.projectDescription,
     managerName: params.context.agentName,
     // 대화에는 부모 카드가 없습니다.
-    managerTaskId: null,
+    managerTaskId: mission?.id ?? null,
+    asyncDelegation: true,
     folderContext: params.manager.folderContext ?? '',
     onEvent: params.manager.onEvent,
   } : null;
@@ -169,19 +212,25 @@ export async function prepareChatTurn(db: D1Database, userId: string, params: {
   };
   // 자율도가 'tasks' 면 채용·위임 도구를 아예 붙이지 않습니다 (모델에게 없는 도구는 쓸 수 없습니다).
   const canDelegate = Boolean(managerContext) && (params.manager?.autonomy ?? 'auto') === 'auto';
-  const managerSection = managerContext
-    ? `${canDelegate ? MANAGER_CHAT_RULES : MANAGER_TASKS_ONLY_RULES}\n\n${renderTeam(await loadMembers(db, userId, params.projectId))}`
-    : '';
+  const members = managerContext ? await loadMembers(db, userId, params.projectId) : [];
+  const teamNames = members.filter((member) => !member.isManager).map((member) => member.name);
+  const missionSection = renderMissionSection(mission, missionChildren);
+  const managerSection = [
+    managerContext ? `${canDelegate ? MANAGER_CHAT_RULES : MANAGER_TASKS_ONLY_RULES}\n\n${renderTeam(members)}` : '',
+    missionSection,
+  ].filter(Boolean).join('\n\n');
 
   return {
     system: buildChatSystem(params.context, window, renderMemorySection(memory), renderChatSummary(summary), renderSkillIndex(skills), managerSection, renderProfileSection(profile, '')),
     messages: recent.map((item) => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content })),
     tools: [
       RECALL_TOOL as unknown as ToolDefinition, MEMORY_TOOL, USE_SKILL_TOOL,
-      ...(managerContext ? [...(canDelegate ? MANAGER_TOOLS : []), CREATE_TASK_TOOL] : []),
+      ...(managerContext ? [...(canDelegate ? MANAGER_TOOLS : []), READ_TASK_TOOL, CREATE_TASK_TOOL] : []),
     ],
     executeTool: (name, input) => {
       if (managerContext && MANAGER_TOOL_NAMES.has(name)) {
+        // 결과 읽기는 자율도와 무관하게 허용합니다.
+        if (name === READ_TASK_TOOL.name) return executeManagerTool(name, input, managerContext, managerLog);
         if (!canDelegate) return Promise.resolve({ error: '이번 대화는 자율도가 낮아 합류·위임을 할 수 없습니다. create_task 로 카드만 남기고 직접 답하세요.' });
         return executeManagerTool(name, input, managerContext, managerLog);
       }
@@ -207,6 +256,9 @@ export async function prepareChatTurn(db: D1Database, userId: string, params: {
     summary,
     managerLog,
     taskLog,
+    canDelegate,
+    teamNames,
+    mission,
     isManager: Boolean(managerContext),
   };
 }

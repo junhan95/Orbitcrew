@@ -1,4 +1,5 @@
 import { getCurrentUser } from '@/app/auth';
+import { isReviewStatus } from '@/lib/task-status';
 import { getDatabase } from '@/db';
 
 const HOUR = 3_600_000;
@@ -51,8 +52,8 @@ export async function GET() {
         COUNT(t.id) AS taskCount,
         SUM(CASE WHEN t.status = '대기' THEN 1 ELSE 0 END) AS waitingCount,
         SUM(CASE WHEN t.status = '진행 중' THEN 1 ELSE 0 END) AS doingCount,
-        SUM(CASE WHEN t.status = '검토' THEN 1 ELSE 0 END) AS reviewCount,
-        SUM(CASE WHEN t.priority = '높음' AND t.status != '검토' THEN 1 ELSE 0 END) AS highCount
+        SUM(CASE WHEN t.status IN ('검토 중', '검토 완료') THEN 1 ELSE 0 END) AS reviewCount,
+        SUM(CASE WHEN t.priority = '높음' AND t.status NOT IN ('검토 중', '검토 완료') THEN 1 ELSE 0 END) AS highCount
       FROM projects p LEFT JOIN tasks t ON t.project_id = p.id AND t.user_id = p.user_id
       WHERE p.user_id = ? GROUP BY p.id ORDER BY p.updated_at DESC`).bind(user.userId).all<ProjectRow>(),
     db.prepare(`SELECT a.id, a.name, a.role, a.color,
@@ -65,7 +66,7 @@ export async function GET() {
   const byStatus = new Map(statusRows.results.map((row) => [row.status, Number(row.count) || 0]));
   const waiting = byStatus.get('대기') ?? 0;
   const doing = byStatus.get('진행 중') ?? 0;
-  const review = byStatus.get('검토') ?? 0;
+  const review = (byStatus.get('검토 중') ?? 0) + (byStatus.get('검토 완료') ?? 0);
   const total = waiting + doing + review;
 
   // 최근 60분을 5분 단위 12칸으로 나눈 실행 횟수 히스토그램
@@ -90,7 +91,7 @@ export async function GET() {
     let review = 0;
     for (const row of taskTicks.results) {
       if (row.createdAt >= from && row.createdAt < to) created += 1;
-      if (row.status === '검토' && row.updatedAt >= from && row.updatedAt < to) review += 1;
+      if (isReviewStatus(row.status) && row.updatedAt >= from && row.updatedAt < to) review += 1;
     }
     return { from, created, review };
   });
@@ -102,7 +103,7 @@ export async function GET() {
     let reviewed = 0;
     for (const row of taskTicks.results) {
       if (row.createdAt < to) opened += 1;
-      if (row.status === '검토' && row.updatedAt < to) reviewed += 1;
+      if (isReviewStatus(row.status) && row.updatedAt < to) reviewed += 1;
     }
     return { from, rate: opened ? Math.round((reviewed / opened) * 100) : 0 };
   });

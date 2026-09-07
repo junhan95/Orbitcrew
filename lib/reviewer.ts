@@ -1,10 +1,10 @@
 /**
  * 검토 에이전트 — AI-Native SDLC 플레이북의 REVIEW.md / 양방향 PR 검토를 카드에 옮긴 것.
  *
- * 실행이 '검토' 열에 올라오면, 작성한 에이전트가 아닌 다른 에이전트(QA 우선)가 세 패스로 검토합니다:
+ * 실행이 '검토 중' 열에 올라오면, 작성한 에이전트가 아닌 다른 에이전트(QA 우선)가 세 패스로 검토합니다:
  *   bug(논리 오류·빠진 경우) · spec(카드 본문·하위 작업·완료 조건과 일치) · policy(프로젝트 기억·검토 정책 준수) · proof(검증 근거)
  * 발견은 Important / Nit 으로 나누고 Nit 은 카드당 5개까지만 보고합니다.
- * 발견은 상태를 바꾸지 않습니다 — 카드는 '검토' 열에 그대로 있고, 사람이 승인하거나 수정 요청을 반영해 다시 실행합니다.
+ * 발견은 승인을 대신하지 않습니다 — 판정이 남으면 카드는 '검토 완료' 열로 올라가고, 사람이 승인하거나 수정 요청을 반영해 다시 실행합니다.
  * (플레이북: "발견은 merge 를 막지 않는다. 승인은 branch protection 의 사람 몫.")
  *
  * 검토 정책은 프로젝트/전역 스킬 중 이름이 '검토 정책' 인 것이 있으면 그 본문을, 없으면 DEFAULT_REVIEW_POLICY 를 씁니다.
@@ -15,6 +15,7 @@ import { agentCommentInsert } from './run-loop';
 import { usageInsert } from './usage';
 import { atomicBatch, isPreconditionError } from './atomic';
 import { traceEvent, withTrace } from './telemetry';
+import { syncMissionStatus } from './mission';
 
 export const REVIEW_POLICY_SKILL_NAME = '검토 정책';
 export const MAX_NITS = 5;
@@ -186,13 +187,16 @@ async function runTaskReviewInternal(params: ReviewParams): Promise<ReviewResult
     AND (? IS NULL OR EXISTS (SELECT 1 FROM agent_runs WHERE id = ? AND task_id = ? AND user_id = ?))`,
   [taskId, userId, task.updatedAt, run?.id ?? null, run?.id ?? null, taskId, userId], [
     agentCommentInsert(db, { userId, taskId, author: reviewerName, createdAt: now, content: formatReviewComment(review) }),
-    db.prepare('UPDATE tasks SET review_verdict = ?, reviewed_at = ?, updated_at = ? WHERE id = ? AND user_id = ?').bind(review.verdict, now, now, taskId, userId),
+    // 검토 판정이 남는 순간 '검토 중' → '검토 완료'. 사람이 그새 다른 열로 옮겼으면 그대로 둡니다.
+    db.prepare(`UPDATE tasks SET review_verdict = ?, reviewed_at = ?, updated_at = ?,
+        status = CASE WHEN status = '검토 중' THEN '검토 완료' ELSE status END WHERE id = ? AND user_id = ?`).bind(review.verdict, now, now, taskId, userId),
   ]);
   } catch (error) {
     if (!isPreconditionError(error)) throw error;
     traceEvent('review.skipped', { reason: 'target_changed_or_deleted' });
     return { skipped: '검토 대상이 변경되었거나 삭제됨' };
   }
+  await syncMissionStatus(db, userId, taskId).catch(() => undefined);
   return review;
 }
 

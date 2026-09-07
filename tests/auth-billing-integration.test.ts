@@ -80,7 +80,7 @@ it('runs OAuth session → charge → metered AI task/review → refund → logo
   const task = await (await request(createTask, '/api/tasks', cookie, { title: '통합 검증', projectId: project.project.id, owner: project.manager.name, label: '검증' })).json() as { task: { id: string } };
   const execution = await request(run, '/api/agents/run', cookie, { taskId: task.task.id });
   expect(execution.status).toBe(200);
-  expect(await execution.json()).toMatchObject({ blocked: false, status: '검토' });
+  expect(await execution.json()).toMatchObject({ blocked: false, status: '검토 중' });
   await drainBackground();
   const afterRun = await (await request(credits, '/api/credits', cookie)).json() as CreditsView;
   expect(afterRun.balance.paidMc).toBe(500_000);

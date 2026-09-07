@@ -21,7 +21,7 @@ import { ReviewActions, ReviewBadge, ReviewComment, isReviewComment } from '@/co
 import { type ApiKeyState, ApiKeyDialog, fetchApiKeyState } from '@/components/api-key-dialog';
 import { CreditsCard } from '@/components/credits-card';
 import { PRIORITIES, type Priority, byPriority, toPriority } from '@/lib/priority';
-import { TASK_STATUSES, type TaskStatus } from '@/lib/task-status';
+import { TASK_STATUSES, isReviewStatus, statusTone, type TaskStatus } from '@/lib/task-status';
 import { FIELD_TYPES, FIELD_TYPE_LABELS, type FieldType, type ProjectField } from '@/lib/fields';
 import {
   type FolderLinkState, type FsDirHandle, type ProjectFolder,
@@ -48,7 +48,7 @@ export type WorkspaceSection = '프로젝트' | '에이전트' | '대화' | '설
  * 업무는 사람이 상태를 바꾸거나 직접 실행하지 않고, 담당 에이전트와의 대화로 지시·확인합니다.
  * key 는 같은 업무를 다시 눌러도 대화 화면이 새로 반응하도록 매번 새로 만듭니다.
  */
-export type ChatTarget = { projectId: string; agentName: string; draft: string; key: number };
+export type ChatTarget = { projectId: string; agentName: string; draft: string; key: number; /** 임무 카드 또는 그 팀원 카드 id — 그 임무 스레드로 엽니다 */ taskId?: string };
 
 /** 중요도 배지 색. 높음만 눈에 띄게 하고 나머지는 조용하게 둡니다. */
 const PRIORITY_CLASS: Record<Priority, string> = { 높음: 'high', 중간: 'mid', 낮음: 'low' };
@@ -83,13 +83,15 @@ type TaskDetail = {
 };
 type ChatMessage = { id: string; role: 'user' | 'assistant'; content: string; createdAt: number };
 
-export function WorkspaceView({ section, displayName, email, onNotice, chatTarget, onOpenChat, onProfileSaved, projectTarget, onOpenProject, visible = true }: {
+export function WorkspaceView({ section, displayName, email, onNotice, chatTarget, onOpenChat, onProfileSaved, projectTarget, onProjectTargetConsumed, onOpenProject, visible = true }: {
   visible?: boolean;
   section: WorkspaceSection; displayName: string; email: string; onNotice: (message: string) => void;
   chatTarget?: ChatTarget | null; onOpenChat?: (target: Omit<ChatTarget, 'key'>) => void;
   /** 프로젝트 화면이 이 프로젝트 상세로 바로 들어가야 할 때 (대화의 '프로젝트 바로가기'). key 가 바뀔 때마다 다시 엽니다. */
-  projectTarget?: { projectId: string; key: number } | null;
-  onOpenProject?: (projectId: string) => void;
+  projectTarget?: { projectId: string; taskId?: string; key: number } | null;
+  /** projectTarget 이 적용된 뒤 호출 — 1회성 이동이라 부모가 비웁니다. */
+  onProjectTargetConsumed?: () => void;
+  onOpenProject?: (projectId: string, taskId?: string) => void;
   /** 계정 화면에서 프로필을 저장했을 때 — 사이드바 아바타·인사말을 바로 맞춥니다. */
   onProfileSaved?: (next: { displayName: string; email: string; avatar: string }) => void;
 }) {
@@ -115,7 +117,7 @@ export function WorkspaceView({ section, displayName, email, onNotice, chatTarge
   useEffect(() => { if (visible) void refresh(); }, [refresh, visible]);
 
   if (loading) return <div className="view-loading"><LoaderCircle className="spin" /><span>{t("워크스페이스를 불러오는 중")}</span></div>;
-  if (section === '프로젝트') return <ProjectsView projects={projects} agents={agents} assignments={assignments} onCreated={refresh} onNotice={onNotice} onOpenChat={onOpenChat} projectTarget={projectTarget} />;
+  if (section === '프로젝트') return <ProjectsView projects={projects} agents={agents} assignments={assignments} onCreated={refresh} onNotice={onNotice} onOpenChat={onOpenChat} projectTarget={projectTarget} onTargetConsumed={onProjectTargetConsumed} />;
   if (section === '에이전트') return <AgentsView agents={agents} projects={projects} assignments={assignments} defaultModel={defaultModel} onCreated={refresh} onNotice={onNotice} onOpenChat={onOpenChat} />;
   if (section === '대화') return <ChatView projects={projects} agents={agents} assignments={assignments} onNotice={onNotice} onRefresh={refresh} initial={chatTarget ?? null} visible={visible} onOpenProject={onOpenProject} />;
   if (section === '설정') return <SettingsView onNotice={onNotice} />;
@@ -256,7 +258,7 @@ function ProjectFolders({ projectId, onNotice }: { projectId: string; onNotice: 
   </section>;
 }
 
-function ProjectsView({ projects, agents, assignments, onCreated, onNotice, onOpenChat, projectTarget }: { projects: Project[]; agents: Agent[]; assignments: Assignment[]; onCreated: () => Promise<void>; onNotice: (message: string) => void; onOpenChat?: (target: Omit<ChatTarget, 'key'>) => void; projectTarget?: { projectId: string; key: number } | null }) {
+function ProjectsView({ projects, agents, assignments, onCreated, onNotice, onOpenChat, projectTarget, onTargetConsumed }: { projects: Project[]; agents: Agent[]; assignments: Assignment[]; onCreated: () => Promise<void>; onNotice: (message: string) => void; onOpenChat?: (target: Omit<ChatTarget, 'key'>) => void; projectTarget?: { projectId: string; taskId?: string; key: number } | null; onTargetConsumed?: () => void }) {
   const [name, setName] = useState(''); const [description, setDescription] = useState('');
   const [saving, setSaving] = useState(false);
   // 새 프로젝트 다이얼로그에서 고른 폴더들. 프로젝트가 만들어진 뒤에 핸들을 저장합니다.
@@ -268,10 +270,14 @@ function ProjectsView({ projects, agents, assignments, onCreated, onNotice, onOp
   // 대화의 '프로젝트 바로가기' 로 들어오면 그 프로젝트 상세를 바로 엽니다 (key 가 바뀔 때마다).
   const appliedProjectTarget = useRef<number | null>(projectTarget?.key ?? null);
   useEffect(() => {
-    if (!projectTarget || projectTarget.key === appliedProjectTarget.current) return;
-    appliedProjectTarget.current = projectTarget.key;
-    setOpenedId(projectTarget.projectId);
-  }, [projectTarget]);
+    if (!projectTarget) return;
+    if (projectTarget.key !== appliedProjectTarget.current) {
+      appliedProjectTarget.current = projectTarget.key;
+      setOpenedId(projectTarget.projectId);
+    }
+    // 카드까지 열어야 하면 ProjectDetail 이 연 뒤에 비웁니다 (아래 onFocusApplied).
+    if (!projectTarget.taskId) onTargetConsumed?.();
+  }, [projectTarget, onTargetConsumed]);
   const [editing, setEditing] = useState<Project | null>(null);
   const [editName, setEditName] = useState('');
   const [editDescription, setEditDescription] = useState('');
@@ -474,7 +480,8 @@ function ProjectsView({ projects, agents, assignments, onCreated, onNotice, onOp
   const opened = projects.find((project) => project.id === openedId) || null;
   if (opened) return <>
     <ProjectDetail project={opened} agents={agents} assignments={assignments} onBack={() => setOpenedId(null)} onNotice={onNotice}
-      onRename={() => startRename(opened)} onDelete={() => askRemove(opened)} onOpenChat={onOpenChat} />
+      onRename={() => startRename(opened)} onDelete={() => askRemove(opened)} onOpenChat={onOpenChat}
+      focusTask={projectTarget?.projectId === opened.id ? projectTarget : null} onFocusApplied={onTargetConsumed} />
     {projectDialogs}
   </>;
   return <div className="workspace-view"><ViewHeading eyebrow="Projects" title={t("프로젝트")} description={t("진행 중인 프로젝트와 참여 에이전트를 관리합니다.")} action={action} />
@@ -515,13 +522,27 @@ type BoardColumn = { key: string; title: string; subtitle?: string; color?: stri
  */
 type BoardSection = { key: string; parent: ProjectTask | null; agents: { key: string; name: string; role: string; color: string | undefined; tasks: ProjectTask[] }[] };
 
-function ProjectDetail({ project, agents, assignments, onBack, onNotice, onRename, onDelete, onOpenChat }: { project: Project; agents: Agent[]; assignments: Assignment[]; onBack: () => void; onNotice: (message: string) => void; onRename: () => void; onDelete: () => void; onOpenChat?: (target: Omit<ChatTarget, 'key'>) => void }) {
+function ProjectDetail({ project, agents, assignments, onBack, onNotice, onRename, onDelete, onOpenChat, focusTask, onFocusApplied }: { focusTask?: { taskId?: string; key: number } | null; onFocusApplied?: () => void; project: Project; agents: Agent[]; assignments: Assignment[]; onBack: () => void; onNotice: (message: string) => void; onRename: () => void; onDelete: () => void; onOpenChat?: (target: Omit<ChatTarget, 'key'>) => void }) {
   const [tasks, setTasks] = useState<ProjectTask[]>([]);
   const [fields, setFields] = useState<ProjectField[]>([]);
   const [values, setValues] = useState<Record<string, Record<string, string>>>({});
   const [counts, setCounts] = useState<Record<string, TaskCounts>>({});
   const [loading, setLoading] = useState(true);
-  const [openTaskId, setOpenTaskId] = useState<string | null>(null);
+  const [openTaskId, setOpenTaskId] = useState<string | null>(focusTask?.taskId ?? null);
+  // 대화의 '결과 보기' 로 들어온 회차 — 머리의 '결과보기' 버튼을 잠시 강조합니다.
+  const [spotlightKey, setSpotlightKey] = useState(focusTask?.taskId ? focusTask.key : 0);
+  // 대화의 '📥 보고' 링크로 들어오면 그 카드를 바로 엽니다 (key 가 바뀔 때마다).
+  const appliedFocus = useRef<number | null>(focusTask?.key ?? null);
+  useEffect(() => {
+    if (!focusTask?.taskId) return;
+    if (focusTask.key !== appliedFocus.current) {
+      appliedFocus.current = focusTask.key;
+      setOpenTaskId(focusTask.taskId);
+      setSpotlightKey(focusTask.key);
+    }
+    // 1회성 이동 — 열었으니 부모가 target 을 비워 다음 마운트에서 또 뜨지 않게 합니다.
+    onFocusApplied?.();
+  }, [focusTask, onFocusApplied]);
   const [group, setGroup] = useState<BoardGroup>('담당자');
   // 보드를 다시 읽을 때마다 올라갑니다. 열려 있는 상세 패널도 이 값을 보고 자기 데이터를 새로 읽습니다.
   const [revision, setRevision] = useState(0);
@@ -646,6 +667,7 @@ function ProjectDetail({ project, agents, assignments, onBack, onNotice, onRenam
   const openTaskChat = useCallback((task: ProjectTask) => {
     onOpenChat?.({
       projectId: project.id,
+      taskId: task.id,
       agentName: task.owner,
       draft: tf("'{0}' 업무를 진행해 주세요. 현재 상태와 다음에 할 일을 알려주고, 바로 처리할 수 있으면 이어서 진행해 주세요.", task.title),
     });
@@ -667,7 +689,8 @@ function ProjectDetail({ project, agents, assignments, onBack, onNotice, onRenam
     }
   }, [tasks, onNotice]);
 
-  const reviewCount = tasks.filter((task) => task.status === '검토').length;
+  const reviewCount = tasks.filter((task) => isReviewStatus(task.status)).length;
+  const reviewedCount = tasks.filter((task) => task.status === '검토 완료').length;
   const progress = tasks.length ? Math.round((reviewCount / tasks.length) * 100) : 0;
   const cardFields = useMemo(() => fields.filter((field) => field.showOnCard), [fields]);
 
@@ -756,7 +779,7 @@ function ProjectDetail({ project, agents, assignments, onBack, onNotice, onRenam
         <span className="section-kicker">Project</span>
         <h1>{project.name}</h1>
         <p>{project.description || t("프로젝트 설명이 없습니다.")}</p>
-        <ProjectFileButtons projectId={project.id} onNotice={onNotice} />
+        <ProjectFileButtons projectId={project.id} onNotice={onNotice} spotlightKey={spotlightKey} />
       </div>
       <div className="view-actions">
         <span className="project-status"><i />{t(project.status)}</span>
@@ -773,7 +796,7 @@ function ProjectDetail({ project, agents, assignments, onBack, onNotice, onRenam
 
     <div className="detail-metrics">
       <article><span>{t("전체 업무")}</span><strong>{tasks.length}</strong></article>
-      <article><span>{t("검토 단계")}</span><strong>{reviewCount}</strong></article>
+      <article><span>{t("검토 단계")}</span><strong>{reviewCount}</strong><small>{tf("검토 중 {0} · 검토 완료 {1}", reviewCount - reviewedCount, reviewedCount)}</small></article>
       <article><span>{t("참여 에이전트")}</span><strong>{members.length}</strong></article>
       <article className="detail-progress">
         <span>{t("검토 도달률")}</span><strong>{progress}%</strong>
@@ -830,7 +853,7 @@ function ProjectDetail({ project, agents, assignments, onBack, onNotice, onRenam
                   {!open && cell.tasks.length > 0 && (() => {
                     const brief = briefOf(cell.tasks);
                     return <div className="board-column-brief">
-                      <div className="board-brief-counts">{brief.counts.map((item) => <span className={`board-chip ${item.status === '진행 중' ? 'doing' : item.status === '검토' ? 'review' : ''}`} key={item.status}>{t(item.status)} {item.count}</span>)}</div>
+                      <div className="board-brief-counts">{brief.counts.map((item) => <span className={`board-chip ${statusTone(item.status)}`} key={item.status}>{t(item.status)} {item.count}</span>)}</div>
                       {brief.latest && <button className="board-brief-latest" onClick={() => setOpenTaskId(brief.latest!.id)} aria-label={tf("{0} 상세 열기", brief.latest.title)}>
                         <small>{t("최근")}</small>
                         <b>{brief.latest.title}</b>
@@ -914,7 +937,7 @@ function BoardCard({ task, fields, values, counts, onOpen, onChat }: {
     <button className="board-card-open" onClick={onOpen} aria-label={tf("{0} 상세 열기", task.title)}>
       <div className="board-card-top">
         <span className="task-label" style={{ color: task.accent, backgroundColor: `${task.accent}14` }}>{task.label}</span>
-        <span className={`board-chip ${task.status === '진행 중' ? 'doing' : task.status === '검토' ? 'review' : ''}`}>{t(task.status)}</span>
+        <span className={`board-chip ${statusTone(task.status)}`}>{t(task.status)}</span>
         <ReviewBadge verdict={task.reviewVerdict} blockedReason={task.blockedReason} />
       </div>
       <b>{task.title}</b>
@@ -1086,7 +1109,7 @@ function TaskDetailDialog({ task, project, agents, fields, values, reloadKey, on
           </dd></div>
           <div><dt><ShieldCheck size={13} /> {t("상태")}</dt><dd>
             {/* 상태는 에이전트의 진행에 따라 바뀝니다 — 사람이 직접 옮기지 않습니다. */}
-            <span className={`board-chip ${task.status === '진행 중' ? 'doing' : task.status === '검토' ? 'review' : ''}`}>{t(task.status)}</span>
+            <span className={`board-chip ${statusTone(task.status)}`}>{t(task.status)}</span>
           </dd></div>
           <div><dt><BriefcaseBusiness size={13} /> {t("분류")}</dt><dd>
             <input className="task-field-input" defaultValue={task.label}
@@ -1498,21 +1521,46 @@ function AgentsView({ agents, projects, assignments, defaultModel, onCreated, on
  * 위임 한 건은 하위 에이전트를 실제로 돌리는 것이라 수십 초가 걸려서,
  * 시작(running)과 결과(completed/blocked)를 나눠 표시합니다.
  */
+/**
+ * 대화 사이드바의 에이전트 상태 점.
+ * running(녹색 깜빡임) 업무 진행 중 · done(녹색) 결과가 검토 대기 중 · failed(빨강 깜빡임) 진행 불가/실패 · idle(회색 테두리) 맡은 일 없음.
+ */
+type Presence = 'running' | 'done' | 'failed' | 'idle' | 'complete';
+const PRESENCE_LABEL: Record<Presence, string> = { running: '업무 진행 중', done: '결과 검토 대기', failed: '진행 불가 — 확인 필요', idle: '대기 중', complete: '임무 완료' };
+function agentPresence(name: string, tasks: ProjectTask[], busy: boolean): Presence {
+  const mine = tasks.filter((task) => task.owner === name);
+  if (mine.some((task) => task.blockedReason && !isReviewStatus(task.status))) return 'failed';
+  if (busy || mine.some((task) => task.status === '진행 중')) return 'running';
+  if (mine.some((task) => isReviewStatus(task.status))) return 'done';
+  return 'idle';
+}
+/** 매니저는 팀 전체를 봅니다 — 팀원 중 하나라도 진행 중이면 진행, 막힌 팀원이 있으면 실패, 맡긴 일이 전부 검토 단계에 이르렀으면 임무 완료(녹색 체크). */
+function managerPresence(tasks: ProjectTask[], sending: boolean, teammatesBusy: boolean): Presence {
+  if (tasks.some((task) => task.blockedReason && !isReviewStatus(task.status))) return 'failed';
+  if (sending || teammatesBusy || tasks.some((task) => task.status === '진행 중')) return 'running';
+  if (tasks.length && tasks.every((task) => task.status === '검토 완료')) return 'complete';
+  if (tasks.some((task) => isReviewStatus(task.status))) return 'done';
+  return 'idle';
+}
+
 type ManagerStep =
   | { id: string; kind: 'recruited'; agent: string; role: string }
-  | { id: string; kind: 'delegate'; agent: string; role: string; title: string; state: 'running' | 'completed' | 'blocked'; summary?: string };
+  | { id: string; kind: 'delegate'; agent: string; role: string; title: string; state: 'running' | 'completed' | 'blocked'; summary?: string; taskId?: string };
 
 /** 스트리밍 중 표시할 도구별 진행 문구 */
+/** 대화 스레드 선택값 — 아직 카드가 없는 '새 임무'. 첫 메시지를 보내면 서버가 임무 카드를 만들고 thread 이벤트로 id 를 알려 줍니다. */
+const NEW_THREAD = '__new__';
 const CHAT_TOOL_LABELS: Record<string, string> = {
   recall_history: '과거 기록을 찾는 중…',
   memory: '기억을 정리하는 중…',
   use_skill: '스킬 문서를 읽는 중…',
   recruit_agent: '필요한 에이전트를 합류시키는 중…',
-  delegate_task: '팀원에게 업무를 맡기고 결과를 기다리는 중…',
+  delegate_task: '팀원에게 업무를 맡기는 중…',
+  read_task_result: '팀원 결과 전문을 읽는 중…',
   create_task: '업무 카드를 만드는 중…',
 };
 
-function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial, visible = true, onOpenProject }: { projects: Project[]; agents: Agent[]; assignments: Assignment[]; onNotice: (message: string) => void; onRefresh: () => Promise<void>; initial?: ChatTarget | null; visible?: boolean; onOpenProject?: (projectId: string) => void }) {
+function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial, visible = true, onOpenProject }: { projects: Project[]; agents: Agent[]; assignments: Assignment[]; onNotice: (message: string) => void; onRefresh: () => Promise<void>; initial?: ChatTarget | null; visible?: boolean; onOpenProject?: (projectId: string, taskId?: string) => void }) {
   // 업무 카드에서 '대화하기' 로 들어오면 그 문맥으로 시작합니다 (WorkspaceView 가 key 를 바꿔 새로 마운트합니다).
   const [projectId, setProjectId] = useState(initial?.projectId || projects[0]?.id || '');
   const aiFiles = useAIFileChanges(projectId);
@@ -1520,27 +1568,50 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
   const [agentId, setAgentId] = useState('');
   // 업무 카드에서 '대화하기' 로 들어오면 그 업무의 담당자를 이름으로 먼저 잡아 둡니다 (에이전트 목록이 늦게 와도 안전).
   const [wantedAgent, setWantedAgent] = useState(initial?.agentName ?? '');
+  // 스레드(임무). null = 아직 못 골랐음(업무 목록이 오면 가장 최근 임무), NEW_THREAD = 새 임무(첫 메시지에 임무 카드가 만들어짐), '' = 스레드 없는 일반 대화.
+  const [threadId, setThreadId] = useState<string | null>(initial?.taskId ?? null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   // 압축된 이전 대화 요약 (lib/compaction). 있으면 메시지 목록 위에 접힌 배너로 보여 줍니다.
   const [summary, setSummary] = useState<ChatSummaryInfo | null>(null);
   const [draft, setDraft] = useState('');
+  // 답변 진행 중에 보낸 메시지 — 이번 답변이 끝나면 순서대로 전송됩니다. ref 는 finally 안에서 최신 값을 읽기 위한 것.
+  const [queued, setQueued] = useState<{ id: string; text: string; attachments: ChatAttachment[] }[]>([]);
+  const queueRef = useRef<{ id: string; text: string; attachments: ChatAttachment[] }[]>([]);
+  const sendingRef = useRef(false);
+  // 대화에서 위임돼 백그라운드로 도는 팀원 실행. 끝나면 매니저 대화에 '📥 보고' 가 도착하고 목록에서 빠집니다.
+  const [background, setBackground] = useState<{ taskId: string; agent: string; title: string; projectId: string }[]>([]);
+  const projectBackground = useMemo(() => background.filter((item) => item.projectId === projectId), [background, projectId]);
+  // 백그라운드 실행이 끝났을 때 "지금 보고 있는 프로젝트" 를 알기 위한 ref (클로저의 projectId 는 시작 시점 값).
+  const projectIdRef = useRef(projectId);
+  useEffect(() => { projectIdRef.current = projectId; }, [projectId]);
+  // 이 프로젝트에서 팀원이 작업 중인지 — 주기 폴링이 메시지를 다시 읽을지 정할 때 씁니다.
+  const backgroundRef = useRef(false);
+  useEffect(() => { backgroundRef.current = projectBackground.length > 0; }, [projectBackground]);
+  const [messageReload, setMessageReload] = useState(0);
   // '대화하기'·업무 목록에서 넘어온 제안 문장. 입력란에 회색(placeholder)으로만 보이고, 사용자가 아무것도 안 적고 보내면 이 문장이 나갑니다.
   const [suggestion, setSuggestion] = useState(initial?.draft ?? '');
   const [sending, setSending] = useState(false);
+
+  const [streamText, setStreamText] = useState('');
+  const [toolNote, setToolNote] = useState('');
+  const [steps, setSteps] = useState<ManagerStep[]>([]);
+  /** 다른 프로젝트·에이전트·스레드로 옮길 때 — 이전 대화의 메시지·진행 흔적('이번 답변에서 한 일')이 새 화면에 남지 않게 비웁니다. */
+  const resetConversationView = useCallback(() => {
+    setMessages([]); setSummary(null); setSteps([]); setStreamText(''); setToolNote('');
+  }, []);
   const appliedTarget = useRef(initial?.key);
   // Keep an active stream alive; apply a requested conversation after it finishes.
   useEffect(() => {
     if (!initial || initial.key === appliedTarget.current || sending) return;
     appliedTarget.current = initial.key;
-    setProjectId(initial.projectId); setAgentId(''); setWantedAgent(initial.agentName ?? '');
+    setProjectId(initial.projectId); setAgentId(''); setWantedAgent(initial.agentName ?? ''); setThreadId(initial.taskId ?? null);
     setDraft(''); setSuggestion(initial.draft ?? '');
-  }, [initial, sending]);
-
-  const [streamText, setStreamText] = useState('');
-  const [toolNote, setToolNote] = useState('');
-  const [steps, setSteps] = useState<ManagerStep[]>([]);
+    resetConversationView();
+  }, [initial, sending, resetConversationView]);
   // 사이드바에 띄우는 이 프로젝트의 업무. 대화 중 매니저가 카드를 만들거나 끝내면 다시 읽습니다.
   const [boardTasks, setBoardTasks] = useState<ProjectTask[]>([]);
+  // 어느 프로젝트의 업무 목록을 받았는지 — 스레드 기본값을 고르기 전에 목록이 왔는지 확인합니다.
+  const [loadedFor, setLoadedFor] = useState('');
   // 이번 턴에만 함께 보낼 첨부 파일 (보관하지 않습니다 — lib/attachments 주석 참고).
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1556,16 +1627,42 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
   const wanted = wantedAgent ? availableAgents.find((agent) => agent.name === wantedAgent) : undefined;
   const selectedAgentId = wanted?.id || (availableAgents.some((agent) => agent.id === agentId) ? agentId : availableAgents[0]?.id || '');
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId);
+  const managerName = availableAgents.find((agent) => agent.isManager)?.name ?? '';
+  // 매니저 카드 = 임무(스레드). 팀원 카드는 parentTaskId 로 임무에 매달립니다.
+  const missions = useMemo(() => boardTasks.filter((task) => task.owner === managerName && !task.parentTaskId).sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)), [boardTasks, managerName]);
+  const teamTasks = useMemo(() => boardTasks.filter((task) => task.owner !== managerName), [boardTasks, managerName]);
+  const currentMission = threadId && threadId !== NEW_THREAD ? missions.find((mission) => mission.id === threadId) ?? null : null;
+  const threadTasks = useMemo(() => currentMission ? boardTasks.filter((task) => task.parentTaskId === currentMission.id) : [], [boardTasks, currentMission]);
+  // 스레드가 정해지지 않았으면 가장 최근 임무로, 팀원 카드 id 로 들어왔으면 그 부모 임무로 맞춥니다.
+  useEffect(() => {
+    if (loadedFor !== projectId) return;
+    const next = threadId === null
+      ? (missions[0]?.id ?? NEW_THREAD)
+      : threadId === NEW_THREAD || threadId === '' ? threadId
+        : (boardTasks.find((item) => item.id === threadId)?.parentTaskId ?? threadId);
+    // oxlint-disable-next-line react/react-compiler -- 서버에서 온 업무 목록을 보고 나서야 기본 스레드를 정할 수 있습니다.
+    if (next !== threadId) setThreadId(next);
+  }, [boardTasks, missions, threadId, projectId, loadedFor]);
 
   const loadBoardTasks = useCallback(() => {
     if (!projectId) return;
     fetch(`/api/tasks?projectId=${encodeURIComponent(projectId)}`)
       .then(async (response) => await response.json() as { tasks?: ProjectTask[] })
-      .then((data) => setBoardTasks(data.tasks || []))
+      .then((data) => { setBoardTasks(data.tasks || []); setLoadedFor(projectId); })
       .catch(() => { /* 업무 목록은 보조 정보라 실패해도 대화를 막지 않습니다. */ });
   }, [projectId]);
 
   useEffect(() => { loadBoardTasks(); }, [loadBoardTasks]);
+  // 상태 점이 실시간에 가깝게 따라가도록, 화면이 보이는 동안 8초마다 업무를 다시 읽습니다.
+  useEffect(() => {
+    if (!visible || !projectId) return;
+    const timer = setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      loadBoardTasks();
+      if (backgroundRef.current) setMessageReload((value) => value + 1);
+    }, 8_000);
+    return () => clearInterval(timer);
+  }, [visible, projectId, loadBoardTasks]);
 
   const loadFolders = useCallback(() => {
     if (!projectId) return;
@@ -1641,7 +1738,7 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
     };
   }, [loadBoardTasks]);
 
-  useEffect(() => { if (!projectId || !selectedAgentId) return; let canceled = false; fetch(`/api/chat?projectId=${encodeURIComponent(projectId)}&agentId=${encodeURIComponent(selectedAgentId)}`).then(async (response) => await response.json() as { messages?: ChatMessage[]; summary?: ChatSummaryInfo | null }).then((data) => { if (canceled) return; setMessages(data.messages || []); setSummary(data.summary ?? null); }).catch(() => { if (canceled) return; setMessages([]); setSummary(null); }); return () => { canceled = true; }; }, [projectId, selectedAgentId]);
+  useEffect(() => { if (!projectId || !selectedAgentId || threadId === null) return; if (threadId === NEW_THREAD) return; let canceled = false; fetch(`/api/chat?projectId=${encodeURIComponent(projectId)}&agentId=${encodeURIComponent(selectedAgentId)}&taskId=${encodeURIComponent(threadId)}`).then(async (response) => await response.json() as { messages?: ChatMessage[]; summary?: ChatSummaryInfo | null }).then((data) => { if (canceled) return; setMessages(data.messages || []); setSummary(data.summary ?? null); }).catch(() => { if (canceled) return; setMessages([]); setSummary(null); }); return () => { canceled = true; }; }, [projectId, selectedAgentId, threadId, messageReload]);
 
   // 사용자가 위로 스크롤해 지난 대화를 보고 있으면 자동 스크롤을 멈춥니다.
   const handleScroll = useCallback(() => {
@@ -1666,19 +1763,117 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
 
   useEffect(() => { pinnedRef.current = true; }, [projectId, selectedAgentId]);
 
+  // 보고 메시지의 '결과 보기' 링크(#task/<id>) — 새 탭 대신 프로젝트 상세의 그 업무를 엽니다. (마크다운이 만든 <a> 를 위임으로 가로챕니다)
+  useEffect(() => {
+    const node = listRef.current;
+    if (!node) return;
+    const onClick = (event: MouseEvent) => {
+      const anchor = (event.target as HTMLElement | null)?.closest?.('a[href^="#task/"]') as HTMLAnchorElement | null;
+      if (!anchor || !projectId) return;
+      event.preventDefault();
+      onOpenProject?.(projectId, anchor.getAttribute('href')?.slice('#task/'.length));
+    };
+    node.addEventListener('click', onClick);
+    return () => node.removeEventListener('click', onClick);
+  }, [projectId, onOpenProject]);
+
   useEffect(() => {
     const insert = (event: Event) => { if ((event as CustomEvent<string>).detail === 'insert-example' && !sending) { if (draft.trim()) { onNotice(t('입력한 내용이 있습니다. 예시를 참고해 직접 수정하세요.')); return; } setDraft(tutorialExample()); } };
     window.addEventListener('orbit-tutorial', insert);
     return () => window.removeEventListener('orbit-tutorial', insert);
   }, [draft, sending, onNotice]);
 
-  async function sendMessage() {
-    const typed = draft.trim() || suggestion.trim();
+  /**
+   * 대화에서 위임된 카드를 백그라운드로 실행합니다. 매니저의 답변은 이미 끝나 대화는 열려 있고,
+   * 이 요청이 끝나면 서버가 매니저 대화에 '📥 보고' 를 남기므로 메시지를 다시 읽어 보여 줍니다.
+   */
+  async function startBackgroundRun(taskId: string, agent: string, title: string, chainDepth = 0) {
+    const runProjectId = projectId;
+    setBackground((current) => current.some((item) => item.taskId === taskId) ? current : [...current, { taskId, agent, title, projectId: runProjectId }]);
+    let outcome: 'completed' | 'blocked' = 'completed';
+    let summary = '';
+    try {
+      const session = await aiFiles.prepare();
+      const folderContext = JSON.stringify(session.roots.map(root => ({ folderId: root.id, name: root.name, files: Object.fromEntries(root.originals) })));
+      const response = await fetch('/api/agents/run', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ taskId, reportToManager: true, folderContext, chainDepth }),
+      });
+      const data = await response.json().catch(() => null) as {
+        error?: string; blocked?: boolean; blockedReason?: string | null; summary?: string;
+        fileChanges?: Array<{ folderId: string; path: string; content: string }>;
+        chain?: {
+          followUps: Array<{ ran: boolean; reason?: string; delegated: Array<{ taskId: string; title: string; agent: string; outcome: string; summary?: string }>; recruited: Array<{ name: string; role: string }> }>;
+          runs: Array<{ taskId: string; agent: string; title: string; blocked: boolean; summary: string; fileChanges?: Array<{ folderId: string; path: string; content: string }> }>;
+          depth: number;
+        } | null;
+      } | null;
+      if (!response.ok) throw new Error(data?.error || t("팀원 실행에 실패했습니다."));
+      outcome = data?.blocked ? 'blocked' : 'completed';
+      summary = (data?.blocked ? data.blockedReason : data?.summary) || '';
+      onNotice(data?.blocked ? tf('{0} 에이전트가 진행 중 문제를 매니저에게 보고했습니다.', agent) : tf('{0} 에이전트가 업무를 완료하고 매니저에게 보고했습니다.', agent));
+      // 팀원이 만든 산출물 파일 — 서버에 보관된 것을 이 브라우저의 작업 폴더에도 저장합니다 (승인 설정에 따라 자동/확인).
+      const producedFiles = [...(data?.fileChanges ?? []), ...(data?.chain?.runs.flatMap((run) => run.fileChanges ?? []) ?? [])];
+      const knownRoots = new Set(session.roots.map((root) => root.id));
+      const applicable = producedFiles.filter((file) => knownRoots.has(file.folderId));
+      if (applicable.length) { try { aiFiles.receive(session, applicable); } catch { /* 폴더 권한이 바뀐 경우 — 서버 보관본은 '결과보기' 로 열 수 있습니다. */ } }
+      if (producedFiles.length) window.dispatchEvent(new Event('orbit-artifacts-changed'));
+      // 매니저 자동 진행 사슬: 서버가 보고 → 자동 진행 → 위임 실행 → … 을 이어서 돌린 결과입니다. 화면의 진행 흔적에 반영하고,
+      // 깊이 상한으로 실행하지 못한 위임('queued')만 브라우저가 이어서 시작합니다.
+      const chain = data?.chain;
+      if (chain) {
+        const sameProject = runProjectId === projectIdRef.current;
+        const leftover: Array<{ taskId: string; agent: string; title: string }> = [];
+        for (const followUp of chain.followUps) {
+          if (!followUp.ran) continue;
+          if (sameProject) for (const member of followUp.recruited) {
+            setSteps((current) => [...current, { id: `r-${member.name}-${current.length}`, kind: 'recruited', agent: member.name, role: member.role }]);
+          }
+          for (const item of followUp.delegated) {
+            if (!item.taskId) continue;
+            if (item.outcome === 'queued') { leftover.push(item); continue; }
+            const state = item.outcome === 'completed' ? 'completed' as const : 'blocked' as const;
+            if (sameProject) setSteps((current) => [...current, { id: `c-${item.agent}-${current.length}`, kind: 'delegate', agent: item.agent, role: '', title: item.title, state, summary: item.summary ?? '', taskId: item.taskId }]);
+          }
+        }
+        if (sameProject && chain.followUps.some((item) => item.ran)) {
+          const names = chain.runs.map((item) => item.agent);
+          onNotice(names.length ? tf('매니저가 다음 단계로 {0}에게 업무를 맡겼습니다.', Array.from(new Set(names)).join(', ')) : t('매니저가 결과를 정리해 안내했습니다.'));
+        }
+        for (const item of leftover) void startBackgroundRun(item.taskId, item.agent, item.title, chain.depth + 1);
+      }
+    } catch (error) {
+      outcome = 'blocked';
+      summary = error instanceof Error ? error.message : t("팀원 실행에 실패했습니다.");
+      onNotice(tf("{0} 실행 실패: {1}", agent, summary));
+    } finally {
+      setBackground((current) => current.filter((item) => item.taskId !== taskId));
+      setSteps((current) => current.map((step) => step.kind === 'delegate' && step.taskId === taskId ? { ...step, state: outcome, summary } : step));
+      setMessageReload((value) => value + 1);
+      loadBoardTasks();
+      void onRefresh();
+    }
+  }
+
+  /**
+   * 답변(위임 포함, 수 분 걸릴 수 있음)이 진행 중이어도 입력은 막지 않습니다.
+   * 진행 중에 보낸 메시지는 대기열에 들어갔다가 이번 답변이 끝나면 순서대로 자동 전송됩니다 —
+   * 같은 대화에 두 턴을 동시에 돌리면 매니저가 앞 턴의 결과를 못 보고, 크레딧 경로는 동시 실행을 거부하기 때문입니다.
+   */
+  async function sendMessage(forced?: { text: string; attachments: ChatAttachment[] }) {
+    const typed = forced ? forced.text : (draft.trim() || suggestion.trim());
+    const sent = forced ? forced.attachments : attachments;
     // 파일만 보내도 되게, 글이 비어 있으면 한 줄을 대신 넣습니다.
-    const message = typed || (attachments.length ? t("첨부한 파일을 확인해 주세요.") : '');
-    if (!message || !selectedAgentId || sending) return;
+    const message = typed || (sent.length ? t("첨부한 파일을 확인해 주세요.") : '');
+    if (!message || !selectedAgentId) return;
+    if (sendingRef.current) {
+      queueRef.current.push({ id: `queued-${Date.now()}-${queueRef.current.length}`, text: message, attachments: sent });
+      setQueued([...queueRef.current]);
+      setDraft(''); setSuggestion(''); setAttachments([]);
+      return;
+    }
     tutorialEvent('message-sent');
-    const sent = attachments;
+    sendingRef.current = true;
     setDraft(''); setSuggestion(''); setAttachments([]); setSending(true); setStreamText(''); setToolNote(''); setSteps([]); pinnedRef.current = true;
     const shown = sent.length ? `${message}\n\n📎 ${sent.map((item) => item.name).join(', ')}` : message;
     const optimistic: ChatMessage = { id: `local-${Date.now()}`, role: 'user', content: shown, createdAt: Date.now() };
@@ -1694,7 +1889,10 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
       const folderContext = JSON.stringify(fileSession.roots.map(root => ({ folderId: root.id, name: root.name, files: Object.fromEntries(root.originals) })));
       const response = await fetch('/api/chat/stream', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectId, agentId: selectedAgentId, message, folderContext, writableFolders: fileSession.roots.map(root => root.id), autonomy, attachments: toPayload(sent) }),
+        body: JSON.stringify({
+          projectId, agentId: selectedAgentId, message, folderContext, writableFolders: fileSession.roots.map(root => root.id), autonomy, attachments: toPayload(sent),
+          taskId: threadId && threadId !== NEW_THREAD ? threadId : '', newThread: (threadId ?? NEW_THREAD) === NEW_THREAD,
+        }),
       });
       if (!response.ok || !response.body) {
         const failure = await response.json().catch(() => null) as { error?: string; code?: string } | null;
@@ -1713,7 +1911,8 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
         let event: {
           fileChanges?: unknown; type?: string; text?: string; error?: string; code?: string; name?: string; message?: ChatMessage;
           kind?: string; agent?: string; role?: string; title?: string; outcome?: string; summary?: string;
-          recruited?: Array<{ name: string; role: string }>; delegated?: Array<{ agent: string; title: string }>; createdTasks?: Array<{ title: string }>;
+          recruited?: Array<{ name: string; role: string }>; delegated?: Array<{ agent: string; title: string; taskId?: string; outcome?: string }>; createdTasks?: Array<{ title: string }>;
+          taskId?: string; delegationMissing?: boolean; thread?: { id: string; title: string } | null; created?: boolean;
         };
         try { event = JSON.parse(trimmed) as typeof event; } catch { return; }
         if (event.type === 'user' && event.message) {
@@ -1732,6 +1931,12 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
             setToolNote('');
             setSteps((current) => [...current, {
               id: `d-${agent}-${current.length}`, kind: 'delegate', agent, role: event.role ?? '', title: event.title ?? '', state: 'running',
+            }]);
+          }
+          if (event.kind === 'delegate_queued') {
+            setToolNote('');
+            setSteps((current) => [...current, {
+              id: `q-${agent}-${current.length}`, kind: 'delegate', agent, role: event.role ?? '', title: event.title ?? '', state: 'running', taskId: event.taskId,
             }]);
           }
           if (event.kind === 'delegate_done') {
@@ -1772,12 +1977,21 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
           setMessages((current) => [...current.filter(item => item.id !== saved.id), saved]);
           setStreamText(''); setToolNote('');
           // 매니저가 대화 중에 팀을 꾸리거나 카드를 만들었으면 사이드바·보드를 다시 읽습니다.
+          const queuedRuns = (event.delegated ?? []).filter((item) => item.outcome === 'queued' && item.taskId);
+          for (const item of queuedRuns) void startBackgroundRun(item.taskId as string, item.agent, item.title);
           const notes = [
             event.recruited?.length ? tf("에이전트 {0}명 합류", event.recruited.length) : '',
-            event.delegated?.length ? tf("업무 {0}건 위임·완료", event.delegated.length) : '',
+            queuedRuns.length ? tf("업무 {0}건 위임 — 팀원이 작업 중", queuedRuns.length) : (event.delegated?.length ? tf("업무 {0}건 위임·완료", event.delegated.length) : ''),
             event.createdTasks?.length ? tf("카드 {0}개 생성", event.createdTasks.length) : '',
           ].filter(Boolean);
           if (notes.length) { boardChanged = true; onNotice(notes.join(' · ')); }
+          else if (event.delegationMissing) onNotice(t('매니저의 위임이 실제로 이루어지지 않았습니다 — 보드에 카드가 없습니다. 다시 요청해 주세요.'));
+        }
+        if (event.type === 'thread') {
+          // 새 임무면 그 스레드로 전환합니다 (보드에도 임무 카드가 생겼으니 다시 읽습니다).
+          if (event.thread?.id) setThreadId(event.thread.id);
+          else setThreadId((current) => current === NEW_THREAD ? '' : current);
+          if (event.created) boardChanged = true;
         }
         if (event.type === 'error') { failure = event.error || t("답변 생성에 실패했습니다."); failureCode = event.code; }
       };
@@ -1810,30 +2024,55 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
       tutorialEvent(busy ? 'billing-busy' : 'message-failed');
       onNotice(error instanceof Error ? error.message : t("메시지를 보내지 못했습니다."));
     }
-    finally { setSending(false); setStreamText(''); setToolNote(''); }
+    finally {
+      sendingRef.current = false;
+      setSending(false); setStreamText(''); setToolNote('');
+      // 답변이 끝나면 대기열의 첫 메시지를 이어서 보냅니다.
+      const next = queueRef.current.shift();
+      setQueued([...queueRef.current]);
+      if (next) void sendMessage({ text: next.text, attachments: next.attachments });
+    }
   }
 
   return <div className="workspace-view chat-page"><ViewHeading eyebrow="Agent Chat" title={t("대화")} description={t("매니저에게 지시하면 대화 중에 팀을 꾸리고 업무를 맡겨 결과까지 가져옵니다.")}
     action={<div className="view-actions"><Button variant="outline" disabled={!projectId || !onOpenProject} onClick={() => { if (projectId) onOpenProject?.(projectId); }}><FolderKanban size={15} /> {t("프로젝트 바로가기")}</Button></div>} />
-    <div className="chat-shell"><aside className="chat-context"><label>{t("프로젝트")}<NativeSelect data-tour="chat-project" value={projectId} onChange={(event) => { setProjectId(event.target.value); setAgentId(''); setWantedAgent(''); }}><NativeSelectOption value="">{t("프로젝트 선택")}</NativeSelectOption>{projects.map((project) => <NativeSelectOption key={project.id} value={project.id}>{project.name}</NativeSelectOption>)}</NativeSelect></label><strong>{t("참여 에이전트")}</strong>{availableAgents.map((agent) => <button data-tour={agent.isManager ? 'chat-manager' : undefined} aria-pressed={selectedAgentId === agent.id} className={selectedAgentId === agent.id ? 'chat-agent active' : 'chat-agent'} key={agent.id} onClick={() => { setAgentId(agent.id); setWantedAgent(''); if (agent.isManager) tutorialEvent('manager-selected'); }}><span style={{ background: agent.color }}>{agent.isManager ? <Bot size={17} aria-hidden="true" /> : agent.name[0]}</span><div><b>{agent.name}</b><small>{t(agent.role)}</small></div></button>)}
-      <strong className="chat-tasks-title">{t("이 프로젝트의 업무")}<em>{boardTasks.length}</em></strong>
+    <div className="chat-shell"><aside className="chat-context"><label>{t("프로젝트")}<NativeSelect data-tour="chat-project" value={projectId} onChange={(event) => { setProjectId(event.target.value); setAgentId(''); setWantedAgent(''); setThreadId(null); resetConversationView(); }}><NativeSelectOption value="">{t("프로젝트 선택")}</NativeSelectOption>{projects.map((project) => <NativeSelectOption key={project.id} value={project.id}>{project.name}</NativeSelectOption>)}</NativeSelect></label><strong>{t("참여 에이전트")}</strong>{availableAgents.map((agent) => <button data-tour={agent.isManager ? 'chat-manager' : undefined} aria-pressed={selectedAgentId === agent.id} className={selectedAgentId === agent.id ? 'chat-agent active' : 'chat-agent'} key={agent.id} onClick={() => { if (agent.id !== selectedAgentId) resetConversationView(); setAgentId(agent.id); setWantedAgent(''); if (agent.isManager) tutorialEvent('manager-selected'); }}>{(() => {
+                const presence = agent.isManager
+                  ? managerPresence(teamTasks, sending && selectedAgentId === agent.id, projectBackground.length > 0)
+                  : agentPresence(agent.name, boardTasks, projectBackground.some((item) => item.agent === agent.name));
+                return <i className={`presence ${presence}`} title={t(PRESENCE_LABEL[presence])} aria-label={tf('{0} 상태: {1}', agent.name, t(PRESENCE_LABEL[presence]))}>{presence === 'complete' && <Check size={12} strokeWidth={3} aria-hidden="true" />}</i>;
+              })()}<span style={{ background: agent.color }}>{agent.isManager ? <Bot size={17} aria-hidden="true" /> : agent.name[0]}</span><div><b>{agent.name}</b><small>{t(agent.role)}</small></div></button>)}
+      <strong className="chat-tasks-title">{t("임무")}<em>{missions.length}</em></strong>
+      <div className="chat-threads">
+        <button className={threadId === NEW_THREAD ? 'chat-task chat-thread new active' : 'chat-task chat-thread new'} onClick={() => { if (threadId !== NEW_THREAD) resetConversationView(); setThreadId(NEW_THREAD); }}><Plus size={12} /> {t("새 임무")}</button>
+        {missions.map((mission) => {
+          const kids = boardTasks.filter((task) => task.parentTaskId === mission.id);
+          return <button className={threadId === mission.id ? 'chat-task chat-thread active' : 'chat-task chat-thread'} key={mission.id} onClick={() => { if (threadId !== mission.id) resetConversationView(); setThreadId(mission.id); }} title={mission.title}>
+            <b>{mission.title}</b>
+            <span><i className={`chat-task-dot ${statusTone(mission.status)}`} />{t(mission.status)}{kids.length ? <em>· {tf("업무 {0}건", kids.length)}</em> : null}</span>
+          </button>;
+        })}
+        <button className={threadId === '' ? 'chat-task chat-thread muted active' : 'chat-task chat-thread muted'} onClick={() => { if (threadId !== '') resetConversationView(); setThreadId(''); }}>{t("일반 대화")}</button>
+      </div>
+      {currentMission && <strong className="chat-tasks-title">{t("이 임무의 업무")}<em>{threadTasks.length}</em></strong>}
       <div className="chat-tasks">
-        {boardTasks.map((task) => <button className="chat-task" key={task.id} title={`${task.owner} · ${t(task.status)}`}
+        {threadTasks.map((task) => <button className="chat-task" key={task.id} title={`${task.owner} · ${t(task.status)}`}
           onClick={() => setSuggestion(tf("'{0}' 업무를 진행해 주세요. 현재 상태와 다음에 할 일을 알려주고, 바로 처리할 수 있으면 이어서 진행해 주세요.", task.title))}>
           <b>{task.title}</b>
           <span>
-            <i className={`chat-task-dot ${task.status === '진행 중' ? 'doing' : task.status === '검토' ? 'review' : ''}`} />{t(task.status)}
+            <i className={`chat-task-dot ${statusTone(task.status)}`} />{t(task.status)}
             <em className={`priority-badge ${PRIORITY_CLASS[toPriority(task.priority)]}`}><Flag size={10} /> {t(toPriority(task.priority))}</em>
           </span>
         </button>)}
-        {!boardTasks.length && <p className="chat-tasks-empty">{t("아직 업무가 없습니다. 매니저에게 목표를 알려주면 카드를 만들어 나눠 맡깁니다.")}</p>}
+        {currentMission && !threadTasks.length && <p className="chat-tasks-empty">{t("아직 이 임무에서 맡긴 업무가 없습니다. 매니저에게 지시하면 카드를 만들어 나눠 맡깁니다.")}</p>}
+        {!currentMission && threadId === NEW_THREAD && <p className="chat-tasks-empty">{t("첫 메시지를 보내면 임무가 만들어지고, 이 스레드의 대화와 업무가 여기에 묶입니다.")}</p>}
       </div>
     </aside>
-      <section className="conversation"><header><span style={{ background: selectedAgent?.color || 'var(--c-inverse)' }}>{selectedAgent?.isManager || !selectedAgent ? <Bot size={17} aria-hidden="true" /> : selectedAgent.name[0]}</span><div><strong>{selectedAgent?.name || t("에이전트를 선택하세요")}</strong><small>{selectedAgent ? t(selectedAgent.role) : t("프로젝트 참여 에이전트")}</small></div><em><i /> {t("대화 가능")}</em></header>
+      <section className="conversation"><header><span style={{ background: selectedAgent?.color || 'var(--c-inverse)' }}>{selectedAgent?.isManager || !selectedAgent ? <Bot size={17} aria-hidden="true" /> : selectedAgent.name[0]}</span><div><strong>{selectedAgent?.name || t("에이전트를 선택하세요")}</strong><small>{selectedAgent ? t(selectedAgent.role) : t("프로젝트 참여 에이전트")}{currentMission ? ` · ${currentMission.title}` : threadId === NEW_THREAD ? ` · ${t("새 임무")}` : ''}</small></div><em><i /> {t("대화 가능")}</em></header>
         <div className="message-list" ref={listRef} onScroll={handleScroll}>{summary && <details className="chat-summary"><summary><Sparkles size={13} /> {tf("이전 대화 {0}개 메시지가 요약으로 압축됨", summary.messageCount)}<em>{t("펼쳐서 보기")}</em></summary><div><Markdown text={summary.content} /><small>{t("세부 문구가 필요하면 에이전트에게 물어보세요 — recall_history 로 원문을 찾습니다.")}</small></div></details>}{!messages.length && !streamText && !summary && <div className="chat-welcome"><Sparkles size={24} /><h2>{selectedAgent?.name || t("AI 에이전트")}{t("에게 무엇을 맡길까요?")}</h2><p>{selectedAgent?.isManager
             ? t("목표와 원하는 결과물을 알려주면 필요한 에이전트를 합류시켜 맡기고, 결과를 검토해 보고합니다.")
             : t("목표, 배경, 원하는 결과물을 알려주면 프로젝트 맥락에 맞춰 답합니다.")}</p></div>}{messages.map((message) => <div className={`message ${message.role}`} key={message.id}><span>{message.role === 'assistant' ? (selectedAgent?.isManager ? <Bot size={17} aria-hidden="true" /> : selectedAgent?.name[0]) : t("나")}</span>{message.role === 'assistant' ? <div className="bubble"><Markdown text={message.content} /><SaveCodeFiles projectId={projectId} message={message.content} /></div> : <div className="bubble">{message.content}</div>}</div>)}{aiFiles.view}{Boolean(steps.length) && <div className="manager-trace" aria-live="polite">
-          <strong>{sending ? t("매니저가 일하는 중") : t("이번 답변에서 한 일")}</strong>
+          <strong>{sending ? t("매니저가 일하는 중") : projectBackground.length ? t("팀원이 작업 중") : t("이번 답변에서 한 일")}</strong>
           <ol>{steps.map((step) => step.kind === 'recruited'
             ? <li className="done" key={step.id}><UserRound size={12} /><span><b>{step.agent}</b>{step.role ? ` · ${t(step.role)}` : ''} {t("합류")}</span></li>
             : <li className={step.state} key={step.id}>
@@ -1849,7 +2088,7 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
           ? <div className="message assistant"><span>{selectedAgent?.isManager ? <Bot size={17} aria-hidden="true" /> : selectedAgent?.name[0]}</span><div className="bubble streaming"><Markdown text={streamText} /><i className="caret" /></div></div>
           : <div className="message assistant"><span>{selectedAgent?.isManager ? <Bot size={17} aria-hidden="true" /> : selectedAgent?.name[0]}</span>{toolNote
               ? <div className="bubble tool-note"><LoaderCircle className="spin" size={13} /> {toolNote}</div>
-              : <div className="bubble thinking"><i /><i /><i /></div>}</div>)}<div ref={bottomRef} className="message-anchor" /></div>
+              : <div className="bubble thinking"><i /><i /><i /></div>}</div>)}{queued.map((item) => <div className="message user queued" key={item.id}><span>{t("나")}</span><div className="bubble"><em>{t("전송 대기")}</em>{item.attachments.length ? `${item.text}\n\n📎 ${item.attachments.map((file) => file.name).join(', ')}` : item.text}</div></div>)}<div ref={bottomRef} className="message-anchor" /></div>
         <div className="chat-composer">
           {Boolean(attachments.length) && <ul className="composer-chips">
             {attachments.map((item) => <li key={item.key}>
@@ -1863,8 +2102,8 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
             title={t("파일·사진 첨부")} aria-label={t("파일·사진 첨부")}><Plus size={18} /></button>
           <input className="composer-file" ref={fileInputRef} type="file" multiple accept={ATTACHMENT_ACCEPT}
             onChange={(event) => void pickAttachments(event)} tabIndex={-1} aria-hidden="true" />
-          <textarea data-tour="chat-input" data-manager={Boolean(selectedAgent?.isManager)} aria-label={t("업무 지시 입력")} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendMessage(); } }} placeholder={suggestion || tf("{0}에게 업무를 지시하세요...", selectedAgent?.name || t('에이전트'))} disabled={!selectedAgentId || sending} />
-          <button className="composer-send" type="button" aria-label={t("메시지 보내기")} aria-busy={sending} onClick={() => void sendMessage()} disabled={!selectedAgentId || (!draft.trim() && !suggestion.trim() && !attachments.length) || sending}>{sending ? <LoaderCircle className="spin" size={17} /> : <Send size={17} />}</button>
+          <textarea data-tour="chat-input" data-manager={Boolean(selectedAgent?.isManager)} aria-label={t("업무 지시 입력")} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendMessage(); } }} placeholder={suggestion || (sending ? t("답변 중에도 이어서 지시할 수 있어요 — 보내면 이번 답변이 끝난 뒤 전달됩니다.") : tf("{0}에게 업무를 지시하세요...", selectedAgent?.name || t('에이전트')))} disabled={!selectedAgentId} />
+          <button className="composer-send" type="button" aria-label={t("메시지 보내기")} aria-busy={sending} onClick={() => void sendMessage()} disabled={!selectedAgentId || (!draft.trim() && !suggestion.trim() && !attachments.length)}>{sending && !draft.trim() && !attachments.length ? <LoaderCircle className="spin" size={17} /> : <Send size={17} />}</button>
           <div className="composer-bar">
             <button className="composer-tool" type="button" onClick={() => void addChatFolder()} disabled={!projectId || !pickerReady || folderBusy}
               title={pickerReady ? t("이 프로젝트에 작업 폴더를 연결합니다.") : t("이 브라우저는 폴더 선택을 지원하지 않습니다. Chrome 또는 Edge 에서 열어 주세요.")}>

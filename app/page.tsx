@@ -16,7 +16,7 @@ import { type ApiKeyState, ApiKeyDialog, INSUFFICIENT_CREDITS_EVENT, NO_API_KEY_
 import { OrbitMark } from '@/components/orbit-mark';
 import { WorkspaceView, type ChatTarget, type WorkspaceSection } from '@/components/workspace-views';
 import { PRIORITIES, type Priority, byPriority, toPriority } from '@/lib/priority';
-import { TASK_STATUSES, type TaskStatus } from '@/lib/task-status';
+import { TASK_STATUSES, isReviewStatus, statusTone, type TaskStatus } from '@/lib/task-status';
 import { agentState } from '@/lib/agent-state';
 import { locale, t, tf } from '@/lib/i18n';
 import { getPrefs, hydratePrefs, updatePrefs, usePrefs, watchSystemTheme } from '@/lib/prefs';
@@ -58,6 +58,8 @@ function weekdayLabel(timestamp: number) {
   return new Intl.DateTimeFormat(locale(), { weekday: 'short' }).format(new Date(timestamp));
 }
 
+/** 대쉬보드 업무 보드는 요약만 — 열당 이 개수까지만 보여 주고 나머지는 '+N건 더' 로 접습니다. */
+const DASHBOARD_BOARD_ROWS = 3;
 const NAV_ITEMS = [['대쉬보드', LayoutDashboard], ['프로젝트', ListChecks], ['대화', MessageSquareText], ['에이전트', Bot], ['승인함', Inbox], ['기억', Brain], ['스킬', BookOpen], ['사용량', ChartColumn]] as const;
 
 type NavSection = '대쉬보드' | '사용량' | '승인함' | '기억' | '스킬' | WorkspaceSection;
@@ -121,7 +123,7 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [chatTarget, setChatTarget] = useState<ChatTarget | null>(null);
   // 대화 화면의 '프로젝트 바로가기' — 프로젝트 화면을 열면서 그 프로젝트 상세로 바로 들어갑니다.
-  const [projectTarget, setProjectTarget] = useState<{ projectId: string; key: number } | null>(null);
+  const [projectTarget, setProjectTarget] = useState<{ projectId: string; taskId?: string; key: number } | null>(null);
   const [selectedResult, setSelectedResult] = useState<Task | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [mountedAt, setMountedAt] = useState<Date | null>(null);
@@ -352,15 +354,17 @@ export default function Home() {
   const scoped = useMemo(() => {
     const waiting = projectTasks.filter((task) => task.status === '대기').length;
     const doing = projectTasks.filter((task) => task.status === '진행 중').length;
-    const review = projectTasks.filter((task) => task.status === '검토').length;
+    const reviewing = projectTasks.filter((task) => task.status === '검토 중').length;
+    const reviewed = projectTasks.filter((task) => task.status === '검토 완료').length;
+    const review = reviewing + reviewed;
     const total = projectTasks.length;
-    return { total, waiting, doing, review, completionRate: total ? Math.round((review / total) * 100) : 0 };
+    return { total, waiting, doing, reviewing, reviewed, review, completionRate: total ? Math.round((review / total) * 100) : 0 };
   }, [projectTasks]);
 
   const scopeLabel = selectedProject ? selectedProject.name : t('전체 프로젝트');
   // 아직 끝나지 않은 '높음' 중요도 업무 — 지금 먼저 봐야 할 일입니다.
   const highCount = useMemo(
-    () => projectTasks.filter((task) => task.status !== '검토' && toPriority(task.priority) === '높음').length,
+    () => projectTasks.filter((task) => !isReviewStatus(task.status) && toPriority(task.priority) === '높음').length,
     [projectTasks],
   );
 
@@ -369,12 +373,13 @@ export default function Home() {
   const weekly = useMemo(() => stats?.weekly ?? [], [stats]);
   const weeklyMax = Math.max(1, ...weekly.flatMap((day) => [day.created, day.review]));
 
-  // 대기 / 진행 중 / 검토 세 조각을 이어 붙인 도넛
+  // 대기 / 진행 중 / 검토 중 / 검토 완료 네 조각을 이어 붙인 도넛
   const donutSegments = useMemo(() => {
     const parts = [
       { key: '대기', value: scoped.waiting, color: 'var(--c-peach)' },
       { key: '진행 중', value: scoped.doing, color: 'var(--c-inverse)' },
-      { key: '검토', value: scoped.review, color: 'var(--c-mint)' },
+      { key: '검토 중', value: scoped.reviewing, color: 'var(--c-mustard)' },
+      { key: '검토 완료', value: scoped.reviewed, color: 'var(--c-mint)' },
     ];
     let offset = 0;
     return parts.map((part) => {
@@ -417,8 +422,10 @@ export default function Home() {
     setChatTarget({ ...target, key: Date.now() });
     goTo('대화');
   }, [goTo]);
-  const openProject = useCallback((projectId: string) => {
-    setProjectTarget({ projectId, key: Date.now() });
+  // 바로가기가 적용된 뒤 비웁니다 — 화면을 다시 마운트해도 같은 카드가 또 열리지 않도록.
+  const consumeProjectTarget = useCallback(() => setProjectTarget(null), []);
+  const openProject = useCallback((projectId: string, taskId?: string) => {
+    setProjectTarget({ projectId, taskId, key: Date.now() });
     goTo('프로젝트');
   }, [goTo]);
 
@@ -655,40 +662,31 @@ export default function Home() {
                 {TASK_STATUSES.map((column) => {
                   const columnTasks = byPriority(visibleTasks.filter((task) => task.status === column));
                   return <div className="kanban-column" key={column}>
-                    <div className="column-heading"><span className={`status-dot ${column === '진행 중' ? 'doing' : column === '검토' ? 'review' : ''}`} /><strong>{t(column)}</strong><span>{columnTasks.length}</span></div>
-                    <div className="task-stack">
-                      {columnTasks.map((task) => <article className="task-card" key={task.id}>
-                        <div className="task-card-head">
-                          <span className="task-label" style={{ color: task.accent, backgroundColor: `${task.accent}14` }}>{task.label}</span>
-                          <button className="task-remove" onClick={() => deleteTask(task)} aria-label={tf('{0} 삭제', task.title)} title={t("업무 삭제")}><Trash2 size={13} /></button>
-                        </div>
-                        <strong>{task.title}</strong>
-                        <div className="task-meta">
+                    <div className="column-heading"><span className={`status-dot ${statusTone(column)}`} /><strong>{t(column)}</strong><span>{columnTasks.length}</span></div>
+                    <ul className="task-brief-list">
+                      {columnTasks.slice(0, DASHBOARD_BOARD_ROWS).map((task) => {
+                        const state = agentState(task, false);
+                        return <li className="task-brief" key={task.id}>
                           <span className="mini-avatar" style={{ background: task.accent }}>{task.owner[0]}</span>
-                          <span>{task.owner}</span>
-                          <span className={`priority-badge ${PRIORITY_CLASS[toPriority(task.priority)]}`} title={tf('중요도 {0}', t(toPriority(task.priority)))}><Flag size={11} /> {t(toPriority(task.priority))}</span>
-                        </div>
-                        <div className="task-actions">
-                          {(() => {
-                            const state = agentState(task, false);
-                            return <span className={`agent-state ${state.key}`} title={state.hint} aria-label={tf('{0} 상태: {1}', task.owner, t(state.label))}>
-                              <i className="agent-state-dot" />
-                              {t(state.label)}
-                            </span>;
-                          })()}
-                          {task.result
-                            ? <button className="run-task result" onClick={() => setSelectedResult(task)}><Check size={13} /> {t("결과")}</button>
-                            : <button className="run-task chat" onClick={() => openChat({
-                                projectId: task.projectId ?? '',
-                                agentName: task.owner,
-                                draft: tf(`'{0}' 업무를 진행해 주세요. 현재 상태와 다음에 할 일을 알려주고, 바로 처리할 수 있으면 이어서 진행해 주세요.`, task.title),
-                              })}><MessageSquareText size={13} /> {t("대화하기")}</button>}
-                        </div>
-                      </article>)}
-                      {!loading && columnTasks.length === 0 && <div className="empty-column">{query.trim() ? t('조건에 맞는 업무가 없어요.') : t('이 단계의 업무가 없어요.')}</div>}
-                    </div>
+                          <button className="task-brief-title" title={task.title} onClick={() => task.result ? setSelectedResult(task) : openChat({
+                            projectId: task.projectId ?? '',
+                            agentName: task.owner,
+                            draft: tf(`'{0}' 업무를 진행해 주세요. 현재 상태와 다음에 할 일을 알려주고, 바로 처리할 수 있으면 이어서 진행해 주세요.`, task.title),
+                          })}>{task.title}</button>
+                          <span className={`agent-state ${state.key}`} title={t(state.label)} aria-label={tf('{0} 상태: {1}', task.owner, t(state.label))}><i className="agent-state-dot" /></span>
+                          <span className={`priority-badge ${PRIORITY_CLASS[toPriority(task.priority)]}`} title={tf('중요도 {0}', t(toPriority(task.priority)))}><Flag size={10} /></span>
+                          {task.result && <span className="task-brief-done" title={t("결과")}><Check size={12} /></span>}
+                          <button className="task-remove" onClick={() => deleteTask(task)} aria-label={tf('{0} 삭제', task.title)} title={t("업무 삭제")}><Trash2 size={12} /></button>
+                        </li>;
+                      })}
+                      {columnTasks.length > DASHBOARD_BOARD_ROWS && <li className="task-brief-more">{tf('+{0}건 더', columnTasks.length - DASHBOARD_BOARD_ROWS)}</li>}
+                      {!loading && columnTasks.length === 0 && <li className="empty-column">{query.trim() ? t('조건에 맞는 업무가 없어요.') : t('이 단계의 업무가 없어요.')}</li>}
+                    </ul>
                   </div>;
                 })}
+              </div>}
+              {Boolean(selectedProject && projectTasks.length) && <div className="board-footer">
+                <button onClick={() => openProject(selectedProject!.id)}>{t("보드 전체 보기")} <ArrowUpRight size={14} /></button>
               </div>}
             </div>
 
@@ -752,7 +750,7 @@ export default function Home() {
             ? <MemoryView onNotice={flash} onChanged={refreshInbox} />
             : activeNav === '스킬'
             ? <SkillsView onNotice={flash} />
-            : activeNav === '대화' ? null : <WorkspaceView section={activeNav} displayName={displayName} email={email} onNotice={flash} chatTarget={chatTarget} onOpenChat={openChat} projectTarget={projectTarget}
+            : activeNav === '대화' ? null : <WorkspaceView section={activeNav} displayName={displayName} email={email} onNotice={flash} chatTarget={chatTarget} onOpenChat={openChat} projectTarget={projectTarget} onProjectTargetConsumed={consumeProjectTarget}
                 onProfileSaved={(next) => { if (next.displayName) setDisplayName(next.displayName.split('@')[0]); setEmail(next.email); setAvatar(next.avatar); }} />}
           {/* 대화 화면은 탭을 오가도 살려 둡니다. 이 래퍼가 page-content 의 직접 자식이라 세로 공간을 여기서 이어받아야 입력창이 화면 아래에 고정됩니다 (.chat-host). */}
           {(chatVisited || activeNav === '대화') && <div className="chat-host" hidden={activeNav !== '대화'} style={activeNav !== '대화' ? { display: 'none' } : undefined}>

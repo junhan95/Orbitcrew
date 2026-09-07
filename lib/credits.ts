@@ -10,6 +10,10 @@ import { atomicBatch } from '@/lib/atomic';
 
 // A model HTTP request is bounded to 180 seconds; crashed reservations expire conservatively.
 export const CREDIT_HOLD_TTL_MS = 5 * 60_000;
+/** 다른 호출이 크레딧을 잡고 있을 때 기다리는 시간. 팀원 백그라운드 실행과 매니저 대화가 같은 계정에서 겹치는 일이 이제 정상이라 즉시 거부하지 않습니다. */
+export const BILLING_WAIT_MS = 90_000;
+const BILLING_POLL_MS = 1_500;
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 export class BillingBusyError extends Error {
   status = 409;
   constructor() { super('다른 AI 호출 또는 환불이 크레딧을 정산하고 있습니다. 잠시 후 다시 시도하세요.'); }
@@ -192,6 +196,8 @@ export class CreditBilling implements ClaudeBilling {
     readonly userId: string,
     private balance: CreditBalance,
     private readonly config: CreditRuntimeConfig,
+    /** 다른 호출이 크레딧을 잡고 있을 때 기다릴 최대 시간 (테스트는 0). */
+    private readonly waitMs: number = BILLING_WAIT_MS,
   ) {}
 
   get availableMc(): number { return this.balance.availableMc - this.usedMc; }
@@ -210,16 +216,22 @@ export class CreditBilling implements ClaudeBilling {
     await previous;
     this.releaseTurn = release;
     try {
-      const id = crypto.randomUUID();
-      const now = Date.now();
-      const held = await this.db.prepare(`INSERT INTO credit_holds (id, user_id, run_id, amount_mc, status, created_at, updated_at)
-        SELECT ?, ?, ?, SUM(amount_mc), 'open', ?, ? FROM credit_ledger WHERE user_id = ?
-        HAVING SUM(amount_mc) > 0 AND NOT EXISTS (SELECT 1 FROM credit_holds WHERE user_id = ? AND (status = 'refund' OR (status = 'open' AND updated_at > ?)))
-        RETURNING amount_mc`).bind(id, this.userId, id, now, now, this.userId, this.userId, now - CREDIT_HOLD_TTL_MS).first<{ amount_mc: number }>();
-      if (!held) {
+      // 다른 호출(팀원 백그라운드 실행 등)이 잡고 있으면 잠깐씩 기다렸다 다시 시도합니다. 잔액이 0 이면 바로 멈춥니다.
+      const deadline = Date.now() + this.waitMs;
+      let id = '';
+      let held: { amount_mc: number } | null = null;
+      for (;;) {
+        id = crypto.randomUUID();
+        const now = Date.now();
+        held = await this.db.prepare(`INSERT INTO credit_holds (id, user_id, run_id, amount_mc, status, created_at, updated_at)
+          SELECT ?, ?, ?, SUM(amount_mc), 'open', ?, ? FROM credit_ledger WHERE user_id = ?
+          HAVING SUM(amount_mc) > 0 AND NOT EXISTS (SELECT 1 FROM credit_holds WHERE user_id = ? AND (status = 'refund' OR (status = 'open' AND updated_at > ?)))
+          RETURNING amount_mc`).bind(id, this.userId, id, now, now, this.userId, this.userId, now - CREDIT_HOLD_TTL_MS).first<{ amount_mc: number }>();
+        if (held) break;
         const balance = await getBalance(this.db, this.userId);
         if (balance.balanceMc <= 0) throw new InsufficientCreditsError(balance.availableMc);
-        throw new BillingBusyError();
+        if (Date.now() >= deadline) throw new BillingBusyError();
+        await sleep(BILLING_POLL_MS);
       }
       this.holdId = id;
       this.balance = await getBalance(this.db, this.userId);
@@ -276,7 +288,8 @@ export class CreditBilling implements ClaudeBilling {
  *   credits → CreditBilling (운영자 키 + 계량). 운영자 키(ANTHROPIC_API_KEY)가 없으면 예전처럼 ApiKeyMissingError.
  * 잔액이 0 이하면 실행 전에 InsufficientCreditsError.
  */
-export async function resolveCredential(db: D1Database, userId: string): Promise<ClaudeCredential> {
+export async function resolveCredential(db: D1Database, userId: string, options: { waitMs?: number } = {}): Promise<ClaudeCredential> {
+  const waitMs = options.waitMs ?? BILLING_WAIT_MS;
   if (authMode() === 'local' && env.ANTHROPIC_API_KEY) return env.ANTHROPIC_API_KEY;
   const stored = await loadUserKey(db, userId);
   if (stored) return stored;
@@ -284,8 +297,15 @@ export async function resolveCredential(db: D1Database, userId: string): Promise
   if (!operatorKey) throw new ApiKeyMissingError();
   const config = creditConfig();
   await grantTrialCredits(db, userId, config);
-  const balance = await getBalance(db, userId);
+  let balance = await getBalance(db, userId);
   if (balance.balanceMc <= 0) throw new InsufficientCreditsError(balance.availableMc);
-  if (balance.heldMc > 0) throw new BillingBusyError();
-  return new CreditBilling(operatorKey, db, userId, balance, config);
+  // 다른 호출이 잡고 있으면 잠깐 기다립니다 — 팀원 백그라운드 실행 중에도 매니저와 대화할 수 있어야 합니다.
+  const deadline = Date.now() + waitMs;
+  while (balance.heldMc > 0) {
+    if (Date.now() >= deadline) throw new BillingBusyError();
+    await sleep(BILLING_POLL_MS);
+    balance = await getBalance(db, userId);
+    if (balance.balanceMc <= 0) throw new InsufficientCreditsError(balance.availableMc);
+  }
+  return new CreditBilling(operatorKey, db, userId, balance, config, waitMs);
 }

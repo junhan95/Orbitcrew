@@ -1,7 +1,8 @@
 import { getCurrentUser } from '@/app/auth';
 import { getDatabase } from '@/db';
 import { isPriority } from '@/lib/priority';
-import { isTaskStatus } from '@/lib/task-status';
+import { isReviewStatus, isTaskStatus } from '@/lib/task-status';
+import { syncMissionStatus } from '@/lib/mission';
 import { recallDocDelete, recallDocUpsert } from '@/lib/recall';
 
 type RouteContext = { params: Promise<{ id: string }> | { id: string } };
@@ -65,8 +66,8 @@ export async function PATCH(request: Request, context: RouteContext) {
     }
     columns.push('project_id = ?'); values.push(body.projectId as string | null);
   }
-  // 상태를 '검토' 밖으로 되돌리면 이전 실행 결과는 지웁니다.
-  if (body.status !== undefined && body.status !== '검토' && existing.result) {
+  // 상태를 검토 단계(검토 중·검토 완료) 밖으로 되돌리면 이전 실행 결과는 지웁니다.
+  if (body.status !== undefined && !isReviewStatus(body.status) && existing.result) {
     columns.push('result = ?'); values.push(null);
     columns.push('summary = ?'); values.push(null);
   }
@@ -75,6 +76,7 @@ export async function PATCH(request: Request, context: RouteContext) {
 
   columns.push('updated_at = ?'); values.push(Date.now());
   await db.prepare(`UPDATE tasks SET ${columns.join(', ')} WHERE id = ? AND user_id = ?`).bind(...values, id, user.userId).run();
+  if (body.status !== undefined) await syncMissionStatus(db, user.userId, id).catch(() => undefined);
 
   const task = await db.prepare(SELECT_TASK).bind(id, user.userId).first<TaskRow>();
   if (task) {

@@ -9,6 +9,7 @@
  * 응답을 막지 않도록 runInBackground 로 돌립니다.
  */
 import { runClaudeAgent, type ClaudeCredential, type ClaudeMessage } from './claude';
+import { THREAD_WHERE } from './mission';
 import { recallDocUpsert } from './recall';
 import { usageInsert } from './usage';
 import { atomicBatch, isPreconditionError } from './atomic';
@@ -31,10 +32,10 @@ export type ChatSummary = {
 
 type MessageRow = { id: string; role: string; content: string; createdAt: number };
 
-export async function loadChatSummary(db: D1Database, userId: string, projectId: string, agentId: string): Promise<ChatSummary | null> {
+export async function loadChatSummary(db: D1Database, userId: string, projectId: string, agentId: string, taskId = ''): Promise<ChatSummary | null> {
   return db.prepare(`SELECT id, content, message_count AS messageCount, covers_from AS coversFrom, covers_to AS coversTo, updated_at AS updatedAt
-      FROM chat_summaries WHERE user_id = ? AND project_id = ? AND agent_id = ?`)
-    .bind(userId, projectId, agentId).first<ChatSummary>();
+      FROM chat_summaries WHERE user_id = ? AND project_id = ? AND agent_id = ? AND task_id = ?`)
+    .bind(userId, projectId, agentId, taskId).first<ChatSummary>();
 }
 
 /** 시스템 프롬프트에 넣는 요약 블록 */
@@ -55,6 +56,8 @@ export function shouldCompact(messagesSinceSummary: number): boolean {
 export type CompactParams = {
   db: D1Database; userId: string; projectId: string; agentId: string; agentName: string;
   apiKey: ClaudeCredential; model: string;
+  /** 스레드(임무 카드 id). 생략하면 일반 대화. */
+  taskId?: string;
 };
 
 /**
@@ -63,12 +66,13 @@ export type CompactParams = {
  */
 export async function compactConversation(params: CompactParams): Promise<{ compacted: number } | { skipped: string }> {
   const { db, userId, projectId, agentId } = params;
-  const previous = await loadChatSummary(db, userId, projectId, agentId);
+  const taskId = params.taskId ?? '';
+  const previous = await loadChatSummary(db, userId, projectId, agentId, taskId);
   const since = previous?.coversTo ?? 0;
 
   const rows = await db.prepare(`SELECT id, role, content, created_at AS createdAt FROM chat_messages
-      WHERE user_id = ? AND project_id = ? AND agent_id = ? AND created_at > ? ORDER BY created_at ASC`)
-    .bind(userId, projectId, agentId, since).all<MessageRow>();
+      WHERE user_id = ? AND project_id = ? AND agent_id = ? AND ${THREAD_WHERE} AND created_at > ? ORDER BY created_at ASC`)
+    .bind(userId, projectId, agentId, taskId, since).all<MessageRow>();
   const pending = rows.results;
   if (pending.length <= KEEP_RECENT) return { skipped: '압축할 만큼 쌓이지 않음' };
 
@@ -121,11 +125,11 @@ export async function compactConversation(params: CompactParams): Promise<{ comp
   await atomicBatch(db, `(? IS NULL OR EXISTS (SELECT 1 FROM projects WHERE id = ? AND user_id = ?))
     AND (? IS NULL OR EXISTS (SELECT 1 FROM agents WHERE id = ? AND user_id = ?))`,
   [projectId, projectId, userId, agentId, agentId, userId], [
-    db.prepare(`INSERT INTO chat_summaries (id, user_id, project_id, agent_id, content, message_count, covers_from, covers_to, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(user_id, project_id, agent_id) DO UPDATE SET
+    db.prepare(`INSERT INTO chat_summaries (id, user_id, project_id, agent_id, task_id, content, message_count, covers_from, covers_to, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, project_id, agent_id, task_id) DO UPDATE SET
           content = excluded.content, message_count = excluded.message_count, covers_to = excluded.covers_to, updated_at = excluded.updated_at`)
-      .bind(summaryId, userId, projectId, agentId, content, messageCount, coversFrom, coversTo, previous ? previous.updatedAt : now, now),
+      .bind(summaryId, userId, projectId, agentId, taskId, content, messageCount, coversFrom, coversTo, previous ? previous.updatedAt : now, now),
     // 흡수된 원문은 회상 인덱스에서 compacted 로 표시 (검색은 계속 됨)
     db.prepare(`UPDATE recall_docs SET active = 0, compacted = 1 WHERE user_id = ? AND kind = 'chat' AND ref_id IN (${batch.map(() => '?').join(',')})`)
       .bind(userId, ...batch.map((row) => row.id)),

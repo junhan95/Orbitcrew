@@ -8,13 +8,14 @@ import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_TEXT_CHARS, type AttachmentP
 import { credentialErrorResponse, resolveCredential } from '@/lib/credits';
 import type { ClaudeCredential } from '@/lib/claude';
 import { toAutonomy } from '@/lib/autonomy';
-import { MEMORY_REVIEW_EVERY, chatMessageIndex, prepareChatTurn, type ChatContext } from '@/lib/chat-agent';
+import { DELEGATION_MISSING_NOTE, DELEGATION_RETRY_PROMPT, MEMORY_REVIEW_EVERY, chatMessageIndex, claimsDelegation, prepareChatTurn, type ChatContext } from '@/lib/chat-agent';
 import type { ManagerEvent } from '@/lib/manager-tools';
 import { streamClaudeAgent } from '@/lib/claude';
 import { compactConversation, shouldCompact } from '@/lib/compaction';
 import { runInBackground, runMemoryReview } from '@/lib/memory-review';
 import { resolveAgentModel } from '@/lib/models';
 import { usageInsert } from '@/lib/usage';
+import { createMission, resolveMission, type MissionRow } from '@/lib/mission';
 
 type ChatRow = { id: string; role: 'user' | 'assistant'; content: string; createdAt: number };
 
@@ -78,7 +79,7 @@ function sanitizeAttachments(raw: unknown): AttachmentPayload[] {
  */
 async function handlePOST(request: Request) {
   const user = await getCurrentUser();
-  const body = await request.json().catch(() => null) as { projectId?: unknown; agentId?: unknown; message?: unknown; folderContext?: unknown; attachments?: unknown; autonomy?: unknown; writableFolders?: unknown } | null;
+  const body = await request.json().catch(() => null) as { projectId?: unknown; agentId?: unknown; message?: unknown; folderContext?: unknown; attachments?: unknown; autonomy?: unknown; writableFolders?: unknown; taskId?: unknown; newThread?: unknown } | null;
   if (typeof body?.projectId !== 'string' || typeof body.agentId !== 'string' || typeof body.message !== 'string' || !body.message.trim()) {
     return Response.json({ error: '프로젝트, 에이전트, 메시지가 필요합니다.' }, { status: 400 });
   }
@@ -91,12 +92,12 @@ async function handlePOST(request: Request) {
   const db = getDatabase();
 
   const context = await db.prepare(`SELECT p.name AS projectName, p.description AS projectDescription,
-      a.name AS agentName, a.role AS agentRole, a.instructions AS instructions, a.model AS agentModel, a.is_manager AS isManager
+      a.name AS agentName, a.role AS agentRole, a.instructions AS instructions, a.model AS agentModel, a.is_manager AS isManager, a.color AS agentColor
     FROM projects p
     JOIN project_agents pa ON pa.project_id = p.id AND pa.user_id = p.user_id
     JOIN agents a ON a.id = pa.agent_id AND a.user_id = p.user_id
     WHERE p.id = ? AND a.id = ? AND p.user_id = ?`)
-    .bind(projectId, agentId, user.userId).first<ChatContext & { agentModel: string | null; isManager: number }>();
+    .bind(projectId, agentId, user.userId).first<ChatContext & { agentModel: string | null; isManager: number; agentColor: string }>();
   if (!context) return Response.json({ error: '이 프로젝트에 배정된 에이전트가 아닙니다.' }, { status: 403 });
 
   const { model: fallbackModel, reviewModel } = getRuntimeConfig();
@@ -105,14 +106,23 @@ async function handlePOST(request: Request) {
   try { apiKey = await resolveCredential(db, user.userId); }
   catch (error) { const denied = credentialErrorResponse(error); if (denied) return denied; throw error; }
 
+  // 스레드: 요청이 가리키는 카드(임무 또는 그 팀원 카드)의 임무로 묶습니다. 매니저 대화에서 '새 임무' 면 임무 카드를 먼저 만듭니다.
+  let threadId = typeof body.taskId === 'string' ? body.taskId.trim() : '';
+  if (threadId) threadId = (await resolveMission(db, user.userId, projectId, threadId))?.id ?? '';
+  let createdMission: MissionRow | null = null;
+  if (!threadId && body.newThread === true && context.isManager) {
+    createdMission = await createMission(db, user.userId, { projectId, managerName: context.agentName, managerColor: context.agentColor, message });
+    threadId = createdMission.id;
+  }
+
   // 파일 자체는 보관하지 않습니다 — 기록에는 이름만 남깁니다.
   const storedContent = attachments.length
     ? `${message}\n\n📎 ${attachments.map((item) => item.name).join(', ')}`
     : message;
   const userMessage: ChatRow = { id: crypto.randomUUID(), role: 'user', content: storedContent, createdAt: Date.now() };
   await db.batch([
-    db.prepare('INSERT INTO chat_messages (id, user_id, project_id, agent_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .bind(userMessage.id, user.userId, projectId, agentId, 'user', storedContent, userMessage.createdAt),
+    db.prepare('INSERT INTO chat_messages (id, user_id, project_id, agent_id, role, content, created_at, task_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .bind(userMessage.id, user.userId, projectId, agentId, 'user', storedContent, userMessage.createdAt, threadId || null),
     chatMessageIndex(db, { userId: user.userId, messageId: userMessage.id, projectId, agentName: context.agentName, role: 'user', content: storedContent, createdAt: userMessage.createdAt }),
   ]);
 
@@ -121,7 +131,7 @@ async function handlePOST(request: Request) {
   const bridge: { emit?: (event: ManagerEvent) => void } = {};
 
   const chat = await prepareChatTurn(db, user.userId, {
-    projectId, agentId, context,
+    projectId, agentId, context, taskId: threadId,
     // 매니저와의 대화면 채용·위임·카드 생성 도구를 붙입니다.
     // 사용자가 자율도를 '읽기 전용'으로 두면 아무 도구도 붙이지 않습니다.
     manager: context.isManager && autonomy !== 'read'
@@ -175,12 +185,14 @@ async function handlePOST(request: Request) {
       let partial = '';
       let lastCheckpoint = 0;
       const checkpoint = chatCheckpoint(async content => {
-        await db.prepare('INSERT INTO chat_messages (id, user_id, project_id, agent_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET content = excluded.content')
-          .bind(assistantMessage.id, user.userId, projectId, agentId, 'assistant', content, assistantMessage.createdAt).run();
+        await db.prepare('INSERT INTO chat_messages (id, user_id, project_id, agent_id, role, content, created_at, task_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET content = excluded.content')
+          .bind(assistantMessage.id, user.userId, projectId, agentId, 'assistant', content, assistantMessage.createdAt, threadId || null).run();
       });
       // 매니저 진행 이벤트를 { type: 'manager', kind: 'delegate_start' | ... } 로 흘립니다.
       bridge.emit = (event) => { send({ type: 'manager', ...event }); };
       send({ type: 'user', message: userMessage });
+      // 이 턴이 묶인 스레드 — 새 임무면 클라이언트가 그 스레드로 전환합니다.
+      send({ type: 'thread', thread: chat.mission ? { id: chat.mission.id, title: chat.mission.title } : null, created: Boolean(createdMission) });
       try {
         const result = await streamClaudeAgent({
           apiKey, model,
@@ -198,13 +210,42 @@ async function handlePOST(request: Request) {
           onToolCall: (name) => { send({ type: 'tool', name }); },
         });
         if (!result.text) throw new Error('답변을 생성하지 못했습니다.');
+
+        // 말뿐인 위임 방지: "○○에게 맡겼습니다" 라고 했는데 이번 턴에 delegate_task 성공이 없으면
+        // 도구를 실제로 부르도록 한 번 되묻고, 그래도 없으면 사용자에게 카드가 없다고 알립니다.
+        let delegationMissing = false;
+        if (chat.canDelegate && !chat.managerLog.delegated.length && result.stopReason === 'end_turn' && claimsDelegation(result.text, chat.teamNames)) {
+          const separator = '\n\n';
+          send({ type: 'tool', name: 'delegate_task' });
+          partial += separator; send({ type: 'delta', text: separator });
+          const retry = await streamClaudeAgent({
+            apiKey, model, maxTokens: 8000, maxIterations: 4,
+            system: chat.system,
+            messages: [...chat.messages, { role: 'assistant', content: result.text }, { role: 'user', content: DELEGATION_RETRY_PROMPT }],
+            tools: chat.tools,
+            executeTool: async (name, input) => { await checkpoint(partial); return chat.executeTool(name, input); },
+            onDelta: (text) => { partial += text; send({ type: 'delta', text }); },
+            onToolCall: (name) => { send({ type: 'tool', name }); },
+          });
+          if (retry.text.trim()) result.text = `${result.text}${separator}${retry.text}`;
+          result.usage = {
+            inputTokens: result.usage.inputTokens + retry.usage.inputTokens, outputTokens: result.usage.outputTokens + retry.usage.outputTokens,
+            cacheCreationTokens: result.usage.cacheCreationTokens + retry.usage.cacheCreationTokens, cacheReadTokens: result.usage.cacheReadTokens + retry.usage.cacheReadTokens,
+            webSearchRequests: result.usage.webSearchRequests + retry.usage.webSearchRequests,
+          };
+          if (!chat.managerLog.delegated.length && claimsDelegation(retry.text, chat.teamNames)) {
+            delegationMissing = true;
+            result.text += DELEGATION_MISSING_NOTE;
+            send({ type: 'delta', text: DELEGATION_MISSING_NOTE });
+          }
+        }
         if (result.stopReason === 'insufficient_credits') { const note = '\n\n---\n※ 크레딧 잔액이 부족해 여기서 중단했습니다. 충전하거나 본인 API 키를 연결해 주세요.'; result.text += note; send({ type: 'delta', text: note }); }
 
         assistantMessage.content = result.text;
         await checkpoint(result.text);
         await db.batch([
-          db.prepare('INSERT INTO chat_messages (id, user_id, project_id, agent_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET content = excluded.content')
-            .bind(assistantMessage.id, user.userId, projectId, agentId, 'assistant', assistantMessage.content, assistantMessage.createdAt),
+          db.prepare('INSERT INTO chat_messages (id, user_id, project_id, agent_id, role, content, created_at, task_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET content = excluded.content')
+            .bind(assistantMessage.id, user.userId, projectId, agentId, 'assistant', assistantMessage.content, assistantMessage.createdAt, threadId || null),
           chatMessageIndex(db, { userId: user.userId, messageId: assistantMessage.id, projectId, agentName: context.agentName, role: 'assistant', content: assistantMessage.content, createdAt: assistantMessage.createdAt }),
           usageInsert(db, { userId: user.userId, kind: 'chat', result, refId: assistantMessage.id, projectId, agentName: context.agentName }),
         ]);
@@ -215,6 +256,7 @@ async function handlePOST(request: Request) {
           recruited: chat.managerLog.recruited,
           delegated: chat.managerLog.delegated,
           createdTasks: chat.taskLog.createdTasks,
+          delegationMissing,
         });
 
         // 사용자 메시지 N개마다 기억 리뷰, 요약 이후 메시지가 넘치면 대화 압축 — 둘 다 응답을 막지 않습니다.
@@ -226,7 +268,7 @@ async function handlePOST(request: Request) {
           }));
         }
         if (shouldCompact(chat.messagesSinceSummary + 1)) {
-          runInBackground(() => compactConversation({ db, userId: user.userId, projectId, agentId, agentName: context.agentName, apiKey, model: reviewModel }), 'chat.compaction');
+          runInBackground(() => compactConversation({ db, userId: user.userId, projectId, agentId, agentName: context.agentName, apiKey, model: reviewModel, taskId: threadId }), 'chat.compaction');
         }
       } catch (error) {
         traceError('chat.failed', error);
