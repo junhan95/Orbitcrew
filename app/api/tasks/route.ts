@@ -3,6 +3,7 @@ import { getDatabase } from '@/db';
 import { PRIORITY_ORDER_SQL, isPriority } from '@/lib/priority';
 import { isTaskStatus } from '@/lib/task-status';
 import { recallDocUpsert } from '@/lib/recall';
+import { sweepStaleRuns } from '@/lib/stale-runs';
 
 type TaskRow = {
   id: string; title: string; label: string; owner: string; status: string;
@@ -23,6 +24,8 @@ export async function GET(request: Request) {
   const user = await getCurrentUser();
   const db = getDatabase();
   const projectId = new URL(request.url).searchParams.get('projectId');
+  // 탭이 닫혀 끝맺음이 기록되지 않은 실행은 여기서 정리해, 보드가 '진행 중' 에 굳어 있지 않게 합니다 (lib/stale-runs).
+  await sweepStaleRuns(db, user.userId).catch(() => undefined);
   const result = projectId
     ? await db.prepare(SELECT_PROJECT_TASKS).bind(user.userId, projectId).all<TaskRow>()
     : await db.prepare(SELECT_TASKS).bind(user.userId).all<TaskRow>();
