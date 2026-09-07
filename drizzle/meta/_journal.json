@@ -183,6 +183,13 @@
       "when": 1788800400000,
       "tag": "0025_chat_threads",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "6",
+      "when": 1788804000000,
+      "tag": "0026_task_files",
+      "breakpoints": true
     }
   ]
 }

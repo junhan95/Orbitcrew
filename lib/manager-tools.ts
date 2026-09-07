@@ -14,6 +14,7 @@ import { runTask } from '@/lib/run-task';
 import { type Priority, toPriority } from '@/lib/priority';
 import { recallDocUpsert } from '@/lib/recall';
 import { syncMissionStatus } from '@/lib/mission';
+import { listTaskFiles } from '@/lib/task-files';
 
 export const MAX_RECRUITS = 4;
 export const MAX_DELEGATIONS = 4;
@@ -46,6 +47,7 @@ export const DELEGATE_TOOL: ToolDefinition = {
   description: [
     '팀원에게 업무를 맡기고 결과 보고를 받습니다. 카드가 보드에 만들어지고 그 자리에서 실행됩니다.',
     'brief 에는 맡을 사람이 이것만 읽고 시작할 수 있도록 배경·요구사항·완료 조건을 충분히 적으세요.',
+    '산출물이 있는 업무면 파일명·형식·저장 폴더와 "결과는 파일로 저장하고 요약만 보고" 를 brief 에 명시하세요.',
     '결과는 이 호출의 반환값으로 돌아옵니다 — 받아서 검토한 뒤 사용자에게 보고하세요.',
     `한 번의 실행에서 최대 ${MAX_DELEGATIONS}건까지 위임할 수 있습니다. 같은 일을 두 번 맡기지 마세요.`,
   ].join(' '),
@@ -235,13 +237,17 @@ export async function executeManagerTool(
       : await db.prepare('SELECT id, title, owner, status, summary, result, blocked_reason AS blockedReason, description FROM tasks WHERE user_id = ? AND project_id = ? AND title LIKE ? ORDER BY updated_at DESC LIMIT 1')
         .bind(userId, projectId, `%${title}%`).first<TaskRow>();
     if (!row) return { ok: false, error: '그런 업무 카드가 이 프로젝트에 없습니다.' };
+    const files = await listTaskFiles(db, userId, row.id);
     return {
       ok: true,
       task_id: row.id, title: row.title, agent: row.owner, status: row.status,
       summary: row.summary ?? '',
       blocked_reason: row.blockedReason ?? undefined,
       result: row.result ? clip(row.result, REPORT_CLIP) : '',
-      note: row.result ? '결과 전문입니다 (잘리지 않았으면 끝까지 그대로입니다).' : '아직 결과가 없습니다 — 팀원이 진행 중이거나 시작 전입니다.',
+      files: files.map((file) => ({ path: file.path, folder_id: file.folderId, content: clip(file.content, 30_000) })),
+      note: files.length
+        ? '팀원이 저장한 산출물 파일(files)과 결과 요약입니다. 검토를 맡길 때는 files 의 내용을 brief 에 그대로 넣으세요.'
+        : row.result ? '결과 전문입니다 (잘리지 않았으면 끝까지 그대로입니다). 산출물 파일은 없습니다 — 파일이 필요하면 파일로 저장하도록 다시 맡기세요.' : '아직 결과가 없습니다 — 팀원이 진행 중이거나 시작 전입니다.',
     };
   }
 

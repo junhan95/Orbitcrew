@@ -18,6 +18,9 @@ import { runInBackground, runMemoryReview } from '@/lib/memory-review';
 import { resolveAgentModel } from '@/lib/models';
 import { RECALL_TOOL, executeRecallTool, recallDocUpsert } from '@/lib/recall';
 import { runTaskReview } from '@/lib/reviewer';
+import { FILE_CHANGE_TOOL, validateFileChange, type FileChange } from '@/lib/ai-file-changes';
+import { upsertTaskFile } from '@/lib/task-files';
+import { FILE_RULES, MANAGER_DELIVERABLE_RULES, REPORT_RULES } from '@/lib/deliverable-rules';
 import { syncMissionStatus } from '@/lib/mission';
 import { addTrace, traceEvent, traceError, withTrace } from '@/lib/telemetry';
 import { agentCommentInsert, checkCircuitBreaker, describeTaskCard, formatRunComment } from '@/lib/run-loop';
@@ -93,6 +96,8 @@ export type RunTaskSuccess = {
   ok: true; runId: string; taskId: string; status: string; output: string; summary: string;
   blocked: boolean; blockedReason: string | null; nextActions: string[]; proof: string[];
   iterations: number; toolCalls: string[];
+  /** 이번 실행에서 save_project_file 로 만든 파일 (서버에 보관됨, 브라우저가 사용자 폴더에도 저장) */
+  fileChanges: FileChange[];
   skillSaves: { scope: string; pendingApproval: boolean; error?: string }[];
   createdTasks: unknown[]; createdFields: unknown[]; setFields: unknown[]; recruited: unknown[]; delegated: unknown[];
 };
@@ -177,6 +182,15 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
   const isManager = Boolean(agent?.isManager) && Boolean(task.projectId) && Boolean(project);
   if (isManager) contextSections.push(renderTeam(await loadMembers(db, user.userId, task.projectId as string)));
 
+  // 산출물 파일 — 프로젝트에 연결된 폴더가 있으면 save_project_file 을 붙입니다. 파일은 서버(task_files)에도 남깁니다.
+  const linkedFolders = task.projectId
+    ? (await db.prepare('SELECT id, name FROM project_folders WHERE project_id = ? AND user_id = ? ORDER BY added_at ASC').bind(task.projectId, user.userId).all<{ id: string; name: string }>()).results
+    : [];
+  const fileChanges: FileChange[] = [];
+  if (linkedFolders.length) {
+    contextSections.push(['## 저장 가능한 작업 폴더 (save_project_file 의 folderId)', ...linkedFolders.map((folder) => `- ${folder.name}: folderId=${folder.id}`)].join('\n'));
+  }
+
   if (folderContext) {
     contextSections.push([
       '## 연결된 작업 폴더 (사용자 컴퓨터)',
@@ -216,8 +230,13 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
     '- 최신 정보가 필요하면 웹 검색을 쓰고, 사실과 추측을 구분해 표시하세요.',
     "- 핵심 정보가 없어 진행할 수 없으면 추측으로 채우지 말고 complete_task(status='blocked') 로 필요한 것을 밝히세요.",
     ...(isManager ? managerRules : workerRules),
+    ...(isManager ? [MANAGER_DELIVERABLE_RULES] : []),
     '- 이 업무를 추적하는 데 반복적으로 필요한 정보가 있으면 define_field 로 필드를 만들고 set_field 로 값을 채우세요. 한 번 쓰고 마는 메모는 요약에 적습니다.',
     '- 마지막에는 반드시 complete_task 를 호출해 요약을 남기세요. 툴을 호출하지 않고 끝내면 보고가 남지 않고, proof 가 비면 "검증 근거 없음" 으로 표시되어 검토 에이전트가 수정 요청을 냅니다.',
+    '',
+    REPORT_RULES,
+    '',
+    linkedFolders.length ? FILE_RULES : `${FILE_RULES}\n- (지금은 연결된 작업 폴더가 없어 save_project_file 도구가 없습니다 — 결과 본문에 전문을 넣고 next_actions 에 폴더 연결을 적으세요.)`,
     '',
     renderProfileSection(profile, ''),
     '',
@@ -295,6 +314,7 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
       tools: [
         RECALL_TOOL as unknown as ToolDefinition, MEMORY_TOOL, USE_SKILL_TOOL, SAVE_SKILL_TOOL, ...TASK_TOOLS,
         ...(managerContext ? MANAGER_TOOLS : []),
+        ...(linkedFolders.length ? [FILE_CHANGE_TOOL] : []),
         COMPLETE_TOOL,
       ],
       async executeTool(name, input) {
@@ -326,6 +346,16 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
             if (asked) return asked;
           }
           return executeTaskTool(name, input, toolContext, toolLog);
+        }
+        if (name === FILE_CHANGE_TOOL.name) {
+          try {
+            const change = validateFileChange(input, linkedFolders.map((folder) => folder.id));
+            const index = fileChanges.findIndex((file) => file.folderId === change.folderId && file.path.toLowerCase() === change.path.toLowerCase());
+            if (index < 0 && fileChanges.length >= 12) return { error: '한 번에 최대 12개 파일을 저장할 수 있습니다.' };
+            if (index < 0) fileChanges.push(change); else fileChanges[index] = change;
+            await upsertTaskFile(db, user.userId, { taskId: task.id, projectId: task.projectId, ...change });
+            return { ok: true, status: 'saved', path: change.path, note: '파일이 보관되었고 사용자 폴더에도 저장됩니다. proof 에 이 경로를 적고, 결과 요약에는 전문 대신 경로와 핵심만 적으세요.' };
+          } catch (error) { return { error: error instanceof Error ? error.message : '파일 저장 실패' }; }
         }
         if (name === 'complete_task') {
           const status = input.status === 'blocked' ? 'blocked' : 'completed';
@@ -433,6 +463,7 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
       iterations: result.iterations, toolCalls: result.toolCalls.map((call) => call.name), skillSaves,
       createdTasks: toolLog.createdTasks, createdFields: toolLog.createdFields, setFields: toolLog.setFields,
       recruited: managerLog.recruited, delegated: managerLog.delegated,
+      fileChanges,
     };
   } catch (error) {
     traceError('run.failed', error);

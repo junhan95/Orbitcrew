@@ -1801,9 +1801,10 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
       });
       const data = await response.json().catch(() => null) as {
         error?: string; blocked?: boolean; blockedReason?: string | null; summary?: string;
+        fileChanges?: Array<{ folderId: string; path: string; content: string }>;
         chain?: {
           followUps: Array<{ ran: boolean; reason?: string; delegated: Array<{ taskId: string; title: string; agent: string; outcome: string; summary?: string }>; recruited: Array<{ name: string; role: string }> }>;
-          runs: Array<{ taskId: string; agent: string; title: string; blocked: boolean; summary: string }>;
+          runs: Array<{ taskId: string; agent: string; title: string; blocked: boolean; summary: string; fileChanges?: Array<{ folderId: string; path: string; content: string }> }>;
           depth: number;
         } | null;
       } | null;
@@ -1811,6 +1812,12 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
       outcome = data?.blocked ? 'blocked' : 'completed';
       summary = (data?.blocked ? data.blockedReason : data?.summary) || '';
       onNotice(data?.blocked ? tf('{0} 에이전트가 진행 중 문제를 매니저에게 보고했습니다.', agent) : tf('{0} 에이전트가 업무를 완료하고 매니저에게 보고했습니다.', agent));
+      // 팀원이 만든 산출물 파일 — 서버에 보관된 것을 이 브라우저의 작업 폴더에도 저장합니다 (승인 설정에 따라 자동/확인).
+      const producedFiles = [...(data?.fileChanges ?? []), ...(data?.chain?.runs.flatMap((run) => run.fileChanges ?? []) ?? [])];
+      const knownRoots = new Set(session.roots.map((root) => root.id));
+      const applicable = producedFiles.filter((file) => knownRoots.has(file.folderId));
+      if (applicable.length) { try { aiFiles.receive(session, applicable); } catch { /* 폴더 권한이 바뀐 경우 — 서버 보관본은 '결과보기' 로 열 수 있습니다. */ } }
+      if (producedFiles.length) window.dispatchEvent(new Event('orbit-artifacts-changed'));
       // 매니저 자동 진행 사슬: 서버가 보고 → 자동 진행 → 위임 실행 → … 을 이어서 돌린 결과입니다. 화면의 진행 흔적에 반영하고,
       // 깊이 상한으로 실행하지 못한 위임('queued')만 브라우저가 이어서 시작합니다.
       const chain = data?.chain;

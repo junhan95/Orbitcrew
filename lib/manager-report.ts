@@ -5,6 +5,7 @@
  */
 import { chatMessageIndex } from './chat-agent';
 import type { RunTaskSuccess } from './run-task';
+import { listTaskFiles } from './task-files';
 
 const REPORT_MAX_CHARS = 6_000;
 
@@ -27,6 +28,8 @@ export async function reportToManagerChat(db: D1Database, userId: string, taskId
     '',
     clipped,
   ];
+  const files = await listTaskFiles(db, userId, taskId);
+  if (files.length) lines.push('', `📎 산출물 파일: ${files.map((file) => `\`${file.path}\``).join(' · ')} — 프로젝트 상세의 '결과보기' 에서 바로 열 수 있습니다.`);
   if (outcome.proof.length) lines.push('', `검증 근거: ${outcome.proof.join(' · ')}`);
   if (outcome.nextActions.length) lines.push('', `다음 단계: ${outcome.nextActions.join(' · ')}`);
   lines.push('', `_전체 결과: [**'${task.title}' 결과 보기**](#task/${taskId}) — 검토가 필요하면 말씀해 주세요._`);

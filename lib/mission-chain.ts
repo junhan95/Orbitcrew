@@ -10,9 +10,10 @@ import { MAX_FOLLOW_UP_DEPTH, runManagerFollowUp, type FollowUpResult } from './
 import { reportToManagerChat, type ReportDelivery } from './manager-report';
 import { runTask, type RunTaskSuccess } from './run-task';
 import type { ClaudeCredential } from './claude';
+import type { FileChange } from './ai-file-changes';
 import { traceError } from './telemetry';
 
-export type ChainRun = { taskId: string; agent: string; title: string; blocked: boolean; summary: string };
+export type ChainRun = { taskId: string; agent: string; title: string; blocked: boolean; summary: string; fileChanges: FileChange[] };
 export type ChainResult = {
   reported: ReportDelivery;
   followUps: FollowUpResult[];
@@ -54,12 +55,12 @@ export async function runReportChain(db: D1Database, userId: string, params: {
       const result = await runTask({ db, userId, taskId: item.taskId, apiKey: params.apiKey, fallbackModel: params.fallbackModel, folderContext: params.folderContext });
       if (!result.ok) {
         item.outcome = 'failed';
-        runs.push({ taskId: item.taskId, agent: item.agent, title: item.title, blocked: true, summary: result.error });
+        runs.push({ taskId: item.taskId, agent: item.agent, title: item.title, blocked: true, summary: result.error, fileChanges: [] });
         continue;
       }
       item.outcome = result.blocked ? 'blocked' : 'completed';
       item.summary = result.blocked ? (result.blockedReason ?? '') : result.summary;
-      runs.push({ taskId: item.taskId, agent: item.agent, title: item.title, blocked: result.blocked, summary: item.summary });
+      runs.push({ taskId: item.taskId, agent: item.agent, title: item.title, blocked: result.blocked, summary: item.summary, fileChanges: result.fileChanges });
       try {
         const delivery = await reportToManagerChat(db, userId, item.taskId, result);
         last = { reported: delivery, outcome: result, taskId: item.taskId };

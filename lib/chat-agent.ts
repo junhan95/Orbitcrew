@@ -16,6 +16,7 @@
  */
 import type { Autonomy } from './autonomy';
 import { THREAD_WHERE, loadMissionChildren, renderMissionSection, resolveMission, type MissionRow } from './mission';
+import { MANAGER_DELIVERABLE_RULES } from './deliverable-rules';
 import type { ClaudeCredential, ClaudeMessage, ToolDefinition, ToolExecutor } from './claude';
 import { CONTEXT_MAX_MESSAGES, loadChatSummary, renderChatSummary, type ChatSummary } from './compaction';
 import {
@@ -70,6 +71,7 @@ const MANAGER_CHAT_RULES = [
   '- 지금 실행할 필요는 없고 보드에 남겨 둘 후속 업무는 create_task 로 카드만 만드세요.',
   '- 위임은 delegate_task 호출이 성공해 task_id 가 돌아왔을 때만 이루어진 것입니다. 도구를 호출하지 않았거나 오류가 돌아왔으면 절대 "위임했습니다/맡겼습니다" 라고 쓰지 말고, 오류 내용을 그대로 알리세요. 위임을 "안내" 하거나 "예정" 으로만 적지 말고 실제로 호출하세요.',
   "- 팀원 결과의 전문이 필요하면(검토, 다른 팀원에게 넘기기) read_task_result 로 읽으세요. '📥 보고' 와 회상 발췌는 요약이라 본문이 짧게 보일 뿐, 실제 결과는 잘리지 않았습니다. 다른 팀원에게 검토를 맡길 때는 읽은 전문을 brief 에 그대로 넣으세요.",
+  MANAGER_DELIVERABLE_RULES,
   '- 답변에는 누구를 합류시켰고 누가 무엇을 했는지, 어떤 카드를 만들었는지 밝히세요.',
   '- 정보가 조금 부족해도 되묻기만 하지 말고, 합리적인 가정을 세워 진행 가능한 부분은 맡겨 결과를 만든 뒤 가정과 확인이 필요한 항목을 함께 적으세요.',
 ].join('\n');

@@ -360,3 +360,10 @@ export const transactionGuards = sqliteTable('transaction_guards', {
 export const runtimeLeases = sqliteTable('runtime_leases', {
   resourceKey: text('resource_key').primaryKey(), token: text('token').notNull(), expiresAt: integer('expires_at').notNull(),
 });
+
+/** 업무 산출물 파일의 서버 보관본 (lib/task-files). 브라우저 저장과 별개로 매니저·QA·'결과보기' 가 읽습니다. */
+export const taskFiles = sqliteTable('task_files', {
+  id: text('id').primaryKey(), userId: text('user_id').notNull(), taskId: text('task_id').notNull(), projectId: text('project_id'),
+  folderId: text('folder_id').notNull().default(''), path: text('path').notNull(), content: text('content').notNull(),
+  createdAt: integer('created_at').notNull(), updatedAt: integer('updated_at').notNull(),
+}, (table) => [uniqueIndex('uq_task_files').on(table.userId, table.taskId, table.path), index('idx_task_files_project').on(table.userId, table.projectId, table.updatedAt)]);
