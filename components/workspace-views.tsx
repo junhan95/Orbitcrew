@@ -1576,11 +1576,20 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
   const queueRef = useRef<{ id: string; text: string; attachments: ChatAttachment[] }[]>([]);
   const sendingRef = useRef(false);
   // 대화에서 위임돼 백그라운드로 도는 팀원 실행. 끝나면 매니저 대화에 '📥 보고' 가 도착하고 목록에서 빠집니다.
-  const [background, setBackground] = useState<{ taskId: string; agent: string; title: string }[]>([]);
+  const [background, setBackground] = useState<{ taskId: string; agent: string; title: string; projectId: string }[]>([]);
+  const projectBackground = useMemo(() => background.filter((item) => item.projectId === projectId), [background, projectId]);
   const [messageReload, setMessageReload] = useState(0);
   // '대화하기'·업무 목록에서 넘어온 제안 문장. 입력란에 회색(placeholder)으로만 보이고, 사용자가 아무것도 안 적고 보내면 이 문장이 나갑니다.
   const [suggestion, setSuggestion] = useState(initial?.draft ?? '');
   const [sending, setSending] = useState(false);
+
+  const [streamText, setStreamText] = useState('');
+  const [toolNote, setToolNote] = useState('');
+  const [steps, setSteps] = useState<ManagerStep[]>([]);
+  /** 다른 프로젝트·에이전트·스레드로 옮길 때 — 이전 대화의 메시지·진행 흔적('이번 답변에서 한 일')이 새 화면에 남지 않게 비웁니다. */
+  const resetConversationView = useCallback(() => {
+    setMessages([]); setSummary(null); setSteps([]); setStreamText(''); setToolNote('');
+  }, []);
   const appliedTarget = useRef(initial?.key);
   // Keep an active stream alive; apply a requested conversation after it finishes.
   useEffect(() => {
@@ -1588,11 +1597,8 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
     appliedTarget.current = initial.key;
     setProjectId(initial.projectId); setAgentId(''); setWantedAgent(initial.agentName ?? ''); setThreadId(initial.taskId ?? null);
     setDraft(''); setSuggestion(initial.draft ?? '');
-  }, [initial, sending]);
-
-  const [streamText, setStreamText] = useState('');
-  const [toolNote, setToolNote] = useState('');
-  const [steps, setSteps] = useState<ManagerStep[]>([]);
+    resetConversationView();
+  }, [initial, sending, resetConversationView]);
   // 사이드바에 띄우는 이 프로젝트의 업무. 대화 중 매니저가 카드를 만들거나 끝내면 다시 읽습니다.
   const [boardTasks, setBoardTasks] = useState<ProjectTask[]>([]);
   // 어느 프로젝트의 업무 목록을 받았는지 — 스레드 기본값을 고르기 전에 목록이 왔는지 확인합니다.
@@ -1769,7 +1775,8 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
    * 이 요청이 끝나면 서버가 매니저 대화에 '📥 보고' 를 남기므로 메시지를 다시 읽어 보여 줍니다.
    */
   async function startBackgroundRun(taskId: string, agent: string, title: string) {
-    setBackground((current) => current.some((item) => item.taskId === taskId) ? current : [...current, { taskId, agent, title }]);
+    const runProjectId = projectId;
+    setBackground((current) => current.some((item) => item.taskId === taskId) ? current : [...current, { taskId, agent, title, projectId: runProjectId }]);
     let outcome: 'completed' | 'blocked' = 'completed';
     let summary = '';
     try {
@@ -1932,6 +1939,7 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
         if (event.type === 'thread') {
           // 새 임무면 그 스레드로 전환합니다 (보드에도 임무 카드가 생겼으니 다시 읽습니다).
           if (event.thread?.id) setThreadId(event.thread.id);
+          else setThreadId((current) => current === NEW_THREAD ? '' : current);
           if (event.created) boardChanged = true;
         }
         if (event.type === 'error') { failure = event.error || t("답변 생성에 실패했습니다."); failureCode = event.code; }
@@ -1977,23 +1985,23 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
 
   return <div className="workspace-view chat-page"><ViewHeading eyebrow="Agent Chat" title={t("대화")} description={t("매니저에게 지시하면 대화 중에 팀을 꾸리고 업무를 맡겨 결과까지 가져옵니다.")}
     action={<div className="view-actions"><Button variant="outline" disabled={!projectId || !onOpenProject} onClick={() => { if (projectId) onOpenProject?.(projectId); }}><FolderKanban size={15} /> {t("프로젝트 바로가기")}</Button></div>} />
-    <div className="chat-shell"><aside className="chat-context"><label>{t("프로젝트")}<NativeSelect data-tour="chat-project" value={projectId} onChange={(event) => { setProjectId(event.target.value); setAgentId(''); setWantedAgent(''); setThreadId(null); }}><NativeSelectOption value="">{t("프로젝트 선택")}</NativeSelectOption>{projects.map((project) => <NativeSelectOption key={project.id} value={project.id}>{project.name}</NativeSelectOption>)}</NativeSelect></label><strong>{t("참여 에이전트")}</strong>{availableAgents.map((agent) => <button data-tour={agent.isManager ? 'chat-manager' : undefined} aria-pressed={selectedAgentId === agent.id} className={selectedAgentId === agent.id ? 'chat-agent active' : 'chat-agent'} key={agent.id} onClick={() => { setAgentId(agent.id); setWantedAgent(''); if (agent.isManager) tutorialEvent('manager-selected'); }}>{(() => {
+    <div className="chat-shell"><aside className="chat-context"><label>{t("프로젝트")}<NativeSelect data-tour="chat-project" value={projectId} onChange={(event) => { setProjectId(event.target.value); setAgentId(''); setWantedAgent(''); setThreadId(null); resetConversationView(); }}><NativeSelectOption value="">{t("프로젝트 선택")}</NativeSelectOption>{projects.map((project) => <NativeSelectOption key={project.id} value={project.id}>{project.name}</NativeSelectOption>)}</NativeSelect></label><strong>{t("참여 에이전트")}</strong>{availableAgents.map((agent) => <button data-tour={agent.isManager ? 'chat-manager' : undefined} aria-pressed={selectedAgentId === agent.id} className={selectedAgentId === agent.id ? 'chat-agent active' : 'chat-agent'} key={agent.id} onClick={() => { if (agent.id !== selectedAgentId) resetConversationView(); setAgentId(agent.id); setWantedAgent(''); if (agent.isManager) tutorialEvent('manager-selected'); }}>{(() => {
                 const presence = agent.isManager
-                  ? managerPresence(teamTasks, sending && selectedAgentId === agent.id, background.length > 0)
-                  : agentPresence(agent.name, boardTasks, background.some((item) => item.agent === agent.name));
+                  ? managerPresence(teamTasks, sending && selectedAgentId === agent.id, projectBackground.length > 0)
+                  : agentPresence(agent.name, boardTasks, projectBackground.some((item) => item.agent === agent.name));
                 return <i className={`presence ${presence}`} title={t(PRESENCE_LABEL[presence])} aria-label={tf('{0} 상태: {1}', agent.name, t(PRESENCE_LABEL[presence]))}>{presence === 'complete' && <Check size={12} strokeWidth={3} aria-hidden="true" />}</i>;
               })()}<span style={{ background: agent.color }}>{agent.isManager ? <Bot size={17} aria-hidden="true" /> : agent.name[0]}</span><div><b>{agent.name}</b><small>{t(agent.role)}</small></div></button>)}
       <strong className="chat-tasks-title">{t("임무")}<em>{missions.length}</em></strong>
       <div className="chat-threads">
-        <button className={threadId === NEW_THREAD ? 'chat-task chat-thread new active' : 'chat-task chat-thread new'} onClick={() => { setThreadId(NEW_THREAD); setMessages([]); setSummary(null); }}><Plus size={12} /> {t("새 임무")}</button>
+        <button className={threadId === NEW_THREAD ? 'chat-task chat-thread new active' : 'chat-task chat-thread new'} onClick={() => { if (threadId !== NEW_THREAD) resetConversationView(); setThreadId(NEW_THREAD); }}><Plus size={12} /> {t("새 임무")}</button>
         {missions.map((mission) => {
           const kids = boardTasks.filter((task) => task.parentTaskId === mission.id);
-          return <button className={threadId === mission.id ? 'chat-task chat-thread active' : 'chat-task chat-thread'} key={mission.id} onClick={() => setThreadId(mission.id)} title={mission.title}>
+          return <button className={threadId === mission.id ? 'chat-task chat-thread active' : 'chat-task chat-thread'} key={mission.id} onClick={() => { if (threadId !== mission.id) resetConversationView(); setThreadId(mission.id); }} title={mission.title}>
             <b>{mission.title}</b>
             <span><i className={`chat-task-dot ${statusTone(mission.status)}`} />{t(mission.status)}{kids.length ? <em>· {tf("업무 {0}건", kids.length)}</em> : null}</span>
           </button>;
         })}
-        <button className={threadId === '' ? 'chat-task chat-thread muted active' : 'chat-task chat-thread muted'} onClick={() => setThreadId('')}>{t("일반 대화")}</button>
+        <button className={threadId === '' ? 'chat-task chat-thread muted active' : 'chat-task chat-thread muted'} onClick={() => { if (threadId !== '') resetConversationView(); setThreadId(''); }}>{t("일반 대화")}</button>
       </div>
       {currentMission && <strong className="chat-tasks-title">{t("이 임무의 업무")}<em>{threadTasks.length}</em></strong>}
       <div className="chat-tasks">
@@ -2013,7 +2021,7 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
         <div className="message-list" ref={listRef} onScroll={handleScroll}>{summary && <details className="chat-summary"><summary><Sparkles size={13} /> {tf("이전 대화 {0}개 메시지가 요약으로 압축됨", summary.messageCount)}<em>{t("펼쳐서 보기")}</em></summary><div><Markdown text={summary.content} /><small>{t("세부 문구가 필요하면 에이전트에게 물어보세요 — recall_history 로 원문을 찾습니다.")}</small></div></details>}{!messages.length && !streamText && !summary && <div className="chat-welcome"><Sparkles size={24} /><h2>{selectedAgent?.name || t("AI 에이전트")}{t("에게 무엇을 맡길까요?")}</h2><p>{selectedAgent?.isManager
             ? t("목표와 원하는 결과물을 알려주면 필요한 에이전트를 합류시켜 맡기고, 결과를 검토해 보고합니다.")
             : t("목표, 배경, 원하는 결과물을 알려주면 프로젝트 맥락에 맞춰 답합니다.")}</p></div>}{messages.map((message) => <div className={`message ${message.role}`} key={message.id}><span>{message.role === 'assistant' ? (selectedAgent?.isManager ? <Bot size={17} aria-hidden="true" /> : selectedAgent?.name[0]) : t("나")}</span>{message.role === 'assistant' ? <div className="bubble"><Markdown text={message.content} /><SaveCodeFiles projectId={projectId} message={message.content} /></div> : <div className="bubble">{message.content}</div>}</div>)}{aiFiles.view}{Boolean(steps.length) && <div className="manager-trace" aria-live="polite">
-          <strong>{sending ? t("매니저가 일하는 중") : background.length ? t("팀원이 작업 중") : t("이번 답변에서 한 일")}</strong>
+          <strong>{sending ? t("매니저가 일하는 중") : projectBackground.length ? t("팀원이 작업 중") : t("이번 답변에서 한 일")}</strong>
           <ol>{steps.map((step) => step.kind === 'recruited'
             ? <li className="done" key={step.id}><UserRound size={12} /><span><b>{step.agent}</b>{step.role ? ` · ${t(step.role)}` : ''} {t("합류")}</span></li>
             : <li className={step.state} key={step.id}>
