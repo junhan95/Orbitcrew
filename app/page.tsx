@@ -16,7 +16,7 @@ import { type ApiKeyState, ApiKeyDialog, INSUFFICIENT_CREDITS_EVENT, NO_API_KEY_
 import { OrbitMark } from '@/components/orbit-mark';
 import { WorkspaceView, type ChatTarget, type WorkspaceSection } from '@/components/workspace-views';
 import { PRIORITIES, type Priority, byPriority, toPriority } from '@/lib/priority';
-import { TASK_STATUSES, type TaskStatus } from '@/lib/task-status';
+import { TASK_STATUSES, isReviewStatus, statusTone, type TaskStatus } from '@/lib/task-status';
 import { agentState } from '@/lib/agent-state';
 import { locale, t, tf } from '@/lib/i18n';
 import { getPrefs, hydratePrefs, updatePrefs, usePrefs, watchSystemTheme } from '@/lib/prefs';
@@ -354,15 +354,17 @@ export default function Home() {
   const scoped = useMemo(() => {
     const waiting = projectTasks.filter((task) => task.status === '대기').length;
     const doing = projectTasks.filter((task) => task.status === '진행 중').length;
-    const review = projectTasks.filter((task) => task.status === '검토').length;
+    const reviewing = projectTasks.filter((task) => task.status === '검토 중').length;
+    const reviewed = projectTasks.filter((task) => task.status === '검토 완료').length;
+    const review = reviewing + reviewed;
     const total = projectTasks.length;
-    return { total, waiting, doing, review, completionRate: total ? Math.round((review / total) * 100) : 0 };
+    return { total, waiting, doing, reviewing, reviewed, review, completionRate: total ? Math.round((review / total) * 100) : 0 };
   }, [projectTasks]);
 
   const scopeLabel = selectedProject ? selectedProject.name : t('전체 프로젝트');
   // 아직 끝나지 않은 '높음' 중요도 업무 — 지금 먼저 봐야 할 일입니다.
   const highCount = useMemo(
-    () => projectTasks.filter((task) => task.status !== '검토' && toPriority(task.priority) === '높음').length,
+    () => projectTasks.filter((task) => !isReviewStatus(task.status) && toPriority(task.priority) === '높음').length,
     [projectTasks],
   );
 
@@ -371,12 +373,13 @@ export default function Home() {
   const weekly = useMemo(() => stats?.weekly ?? [], [stats]);
   const weeklyMax = Math.max(1, ...weekly.flatMap((day) => [day.created, day.review]));
 
-  // 대기 / 진행 중 / 검토 세 조각을 이어 붙인 도넛
+  // 대기 / 진행 중 / 검토 중 / 검토 완료 네 조각을 이어 붙인 도넛
   const donutSegments = useMemo(() => {
     const parts = [
       { key: '대기', value: scoped.waiting, color: 'var(--c-peach)' },
       { key: '진행 중', value: scoped.doing, color: 'var(--c-inverse)' },
-      { key: '검토', value: scoped.review, color: 'var(--c-mint)' },
+      { key: '검토 중', value: scoped.reviewing, color: 'var(--c-mustard)' },
+      { key: '검토 완료', value: scoped.reviewed, color: 'var(--c-mint)' },
     ];
     let offset = 0;
     return parts.map((part) => {
@@ -659,7 +662,7 @@ export default function Home() {
                 {TASK_STATUSES.map((column) => {
                   const columnTasks = byPriority(visibleTasks.filter((task) => task.status === column));
                   return <div className="kanban-column" key={column}>
-                    <div className="column-heading"><span className={`status-dot ${column === '진행 중' ? 'doing' : column === '검토' ? 'review' : ''}`} /><strong>{t(column)}</strong><span>{columnTasks.length}</span></div>
+                    <div className="column-heading"><span className={`status-dot ${statusTone(column)}`} /><strong>{t(column)}</strong><span>{columnTasks.length}</span></div>
                     <ul className="task-brief-list">
                       {columnTasks.slice(0, DASHBOARD_BOARD_ROWS).map((task) => {
                         const state = agentState(task, false);

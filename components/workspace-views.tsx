@@ -21,7 +21,7 @@ import { ReviewActions, ReviewBadge, ReviewComment, isReviewComment } from '@/co
 import { type ApiKeyState, ApiKeyDialog, fetchApiKeyState } from '@/components/api-key-dialog';
 import { CreditsCard } from '@/components/credits-card';
 import { PRIORITIES, type Priority, byPriority, toPriority } from '@/lib/priority';
-import { TASK_STATUSES, type TaskStatus } from '@/lib/task-status';
+import { TASK_STATUSES, isReviewStatus, statusTone, type TaskStatus } from '@/lib/task-status';
 import { FIELD_TYPES, FIELD_TYPE_LABELS, type FieldType, type ProjectField } from '@/lib/fields';
 import {
   type FolderLinkState, type FsDirHandle, type ProjectFolder,
@@ -685,7 +685,8 @@ function ProjectDetail({ project, agents, assignments, onBack, onNotice, onRenam
     }
   }, [tasks, onNotice]);
 
-  const reviewCount = tasks.filter((task) => task.status === '검토').length;
+  const reviewCount = tasks.filter((task) => isReviewStatus(task.status)).length;
+  const reviewedCount = tasks.filter((task) => task.status === '검토 완료').length;
   const progress = tasks.length ? Math.round((reviewCount / tasks.length) * 100) : 0;
   const cardFields = useMemo(() => fields.filter((field) => field.showOnCard), [fields]);
 
@@ -791,7 +792,7 @@ function ProjectDetail({ project, agents, assignments, onBack, onNotice, onRenam
 
     <div className="detail-metrics">
       <article><span>{t("전체 업무")}</span><strong>{tasks.length}</strong></article>
-      <article><span>{t("검토 단계")}</span><strong>{reviewCount}</strong></article>
+      <article><span>{t("검토 단계")}</span><strong>{reviewCount}</strong><small>{tf("검토 중 {0} · 검토 완료 {1}", reviewCount - reviewedCount, reviewedCount)}</small></article>
       <article><span>{t("참여 에이전트")}</span><strong>{members.length}</strong></article>
       <article className="detail-progress">
         <span>{t("검토 도달률")}</span><strong>{progress}%</strong>
@@ -848,7 +849,7 @@ function ProjectDetail({ project, agents, assignments, onBack, onNotice, onRenam
                   {!open && cell.tasks.length > 0 && (() => {
                     const brief = briefOf(cell.tasks);
                     return <div className="board-column-brief">
-                      <div className="board-brief-counts">{brief.counts.map((item) => <span className={`board-chip ${item.status === '진행 중' ? 'doing' : item.status === '검토' ? 'review' : ''}`} key={item.status}>{t(item.status)} {item.count}</span>)}</div>
+                      <div className="board-brief-counts">{brief.counts.map((item) => <span className={`board-chip ${statusTone(item.status)}`} key={item.status}>{t(item.status)} {item.count}</span>)}</div>
                       {brief.latest && <button className="board-brief-latest" onClick={() => setOpenTaskId(brief.latest!.id)} aria-label={tf("{0} 상세 열기", brief.latest.title)}>
                         <small>{t("최근")}</small>
                         <b>{brief.latest.title}</b>
@@ -932,7 +933,7 @@ function BoardCard({ task, fields, values, counts, onOpen, onChat }: {
     <button className="board-card-open" onClick={onOpen} aria-label={tf("{0} 상세 열기", task.title)}>
       <div className="board-card-top">
         <span className="task-label" style={{ color: task.accent, backgroundColor: `${task.accent}14` }}>{task.label}</span>
-        <span className={`board-chip ${task.status === '진행 중' ? 'doing' : task.status === '검토' ? 'review' : ''}`}>{t(task.status)}</span>
+        <span className={`board-chip ${statusTone(task.status)}`}>{t(task.status)}</span>
         <ReviewBadge verdict={task.reviewVerdict} blockedReason={task.blockedReason} />
       </div>
       <b>{task.title}</b>
@@ -1104,7 +1105,7 @@ function TaskDetailDialog({ task, project, agents, fields, values, reloadKey, on
           </dd></div>
           <div><dt><ShieldCheck size={13} /> {t("상태")}</dt><dd>
             {/* 상태는 에이전트의 진행에 따라 바뀝니다 — 사람이 직접 옮기지 않습니다. */}
-            <span className={`board-chip ${task.status === '진행 중' ? 'doing' : task.status === '검토' ? 'review' : ''}`}>{t(task.status)}</span>
+            <span className={`board-chip ${statusTone(task.status)}`}>{t(task.status)}</span>
           </dd></div>
           <div><dt><BriefcaseBusiness size={13} /> {t("분류")}</dt><dd>
             <input className="task-field-input" defaultValue={task.label}
@@ -1524,17 +1525,17 @@ type Presence = 'running' | 'done' | 'failed' | 'idle' | 'complete';
 const PRESENCE_LABEL: Record<Presence, string> = { running: '업무 진행 중', done: '결과 검토 대기', failed: '진행 불가 — 확인 필요', idle: '대기 중', complete: '임무 완료' };
 function agentPresence(name: string, tasks: ProjectTask[], busy: boolean): Presence {
   const mine = tasks.filter((task) => task.owner === name);
-  if (mine.some((task) => task.blockedReason && task.status !== '검토')) return 'failed';
+  if (mine.some((task) => task.blockedReason && !isReviewStatus(task.status))) return 'failed';
   if (busy || mine.some((task) => task.status === '진행 중')) return 'running';
-  if (mine.some((task) => task.status === '검토')) return 'done';
+  if (mine.some((task) => isReviewStatus(task.status))) return 'done';
   return 'idle';
 }
 /** 매니저는 팀 전체를 봅니다 — 팀원 중 하나라도 진행 중이면 진행, 막힌 팀원이 있으면 실패, 맡긴 일이 전부 검토 단계에 이르렀으면 임무 완료(녹색 체크). */
 function managerPresence(tasks: ProjectTask[], sending: boolean, teammatesBusy: boolean): Presence {
-  if (tasks.some((task) => task.blockedReason && task.status !== '검토')) return 'failed';
+  if (tasks.some((task) => task.blockedReason && !isReviewStatus(task.status))) return 'failed';
   if (sending || teammatesBusy || tasks.some((task) => task.status === '진행 중')) return 'running';
-  if (tasks.length && tasks.every((task) => task.status === '검토')) return 'complete';
-  if (tasks.some((task) => task.status === '검토')) return 'done';
+  if (tasks.length && tasks.every((task) => task.status === '검토 완료')) return 'complete';
+  if (tasks.some((task) => isReviewStatus(task.status))) return 'done';
   return 'idle';
 }
 
@@ -1957,7 +1958,7 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
           onClick={() => setSuggestion(tf("'{0}' 업무를 진행해 주세요. 현재 상태와 다음에 할 일을 알려주고, 바로 처리할 수 있으면 이어서 진행해 주세요.", task.title))}>
           <b>{task.title}</b>
           <span>
-            <i className={`chat-task-dot ${task.status === '진행 중' ? 'doing' : task.status === '검토' ? 'review' : ''}`} />{t(task.status)}
+            <i className={`chat-task-dot ${statusTone(task.status)}`} />{t(task.status)}
             <em className={`priority-badge ${PRIORITY_CLASS[toPriority(task.priority)]}`}><Flag size={10} /> {t(toPriority(task.priority))}</em>
           </span>
         </button>)}

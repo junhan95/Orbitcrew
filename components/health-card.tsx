@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { isReviewStatus } from '@/lib/task-status';
 import { Activity, LoaderCircle, RefreshCw, ShieldAlert, Stethoscope } from 'lucide-react';
 import { t, tf, locale, getLang } from '@/lib/i18n';
 import './governance.css';
@@ -66,7 +67,7 @@ export function HealthCard({ onNotice, onOpenTask, compact = false }: {
 
   const metrics = data?.metrics ?? [];
   const worst = metrics.reduce<Tier>((acc, metric) => rank(metric.tier) > rank(acc) ? metric.tier : acc, 'insufficient');
-  const openDiagnoses = (data?.diagnoses ?? []).filter((task) => task.status !== '검토');
+  const openDiagnoses = (data?.diagnoses ?? []).filter((task) => !isReviewStatus(task.status));
   const blocks = (data?.gates ?? []).filter((row) => row.decision === 'block');
   const asks = (data?.gates ?? []).filter((row) => row.decision === 'ask');
 

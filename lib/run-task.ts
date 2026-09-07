@@ -133,7 +133,7 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
       .bind(task.id, user.userId, PRIOR_RUNS).all<PriorRun>(),
     task.projectId
       ? db.prepare(`SELECT id, title, owner, label, summary, result, updated_at AS updatedAt FROM tasks
-          WHERE user_id = ? AND project_id = ? AND id != ? AND status = '검토' AND (summary IS NOT NULL OR result IS NOT NULL)
+          WHERE user_id = ? AND project_id = ? AND id != ? AND status IN ('검토 중', '검토 완료') AND (summary IS NOT NULL OR result IS NOT NULL)
           ORDER BY updated_at DESC LIMIT ?`).bind(user.userId, task.projectId, task.id, SIBLING_TASKS).all<SiblingTask>()
       : Promise.resolve({ results: [] as SiblingTask[] }),
   ]);
@@ -384,7 +384,8 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
       skillSaves,
       usagePerIteration: result.usagePerIteration.map((u) => ({ in: u.inputTokens, out: u.outputTokens, cacheWrite: u.cacheCreationTokens, cacheRead: u.cacheReadTokens })),
     });
-    const nextStatus = blocked ? '대기' : '검토';
+    // 결과가 나오면 '검토 중' — 곧이어 검토 에이전트가 돌고, 판정이 남으면 lib/reviewer 가 '검토 완료' 로 올립니다.
+    const nextStatus = blocked ? '대기' : '검토 중';
 
     await leasedBatch(db, lease, [
       db.prepare('UPDATE agent_runs SET status = ?, outcome = ?, output = ?, summary = ?, metadata = ?, response_id = ?, completed_at = ? WHERE id = ? AND user_id = ?')
