@@ -400,6 +400,7 @@ export const EN: Record<string, string> = {
 '{0} 실행 실패: {1}': '{0} failed: {1}',
 '팀원이 작업 중': 'Teammates at work',
 '답변 작성 중': 'Replying…',
+'여기에 놓으면 첨부됩니다': 'Drop to attach',
 '생각하는 중': 'Thinking…',
 '팀원 작업 중 — {0}': 'Teammates at work — {0}',
 '{0} 이(가) 작업 중입니다 — 끝나면 보고가 이 대화에 도착하고 매니저가 다음 단계를 이어 갑니다.': '{0} is working — the report lands here when done and the manager continues with the next step.',

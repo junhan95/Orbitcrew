@@ -1704,6 +1704,11 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
   async function pickAttachments(event: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files ?? []);
     event.target.value = '';
+    await addAttachmentFiles(files);
+  }
+
+  /** 파일 선택('+')과 드래그 앤 드롭이 함께 쓰는 첨부 처리 — 개수·용량 상한을 넘는 파일은 건너뛰고 알립니다. */
+  async function addAttachmentFiles(files: File[]) {
     if (!files.length) return;
     const accepted: ChatAttachment[] = [];
     const skipped: string[] = [];
@@ -1723,6 +1728,20 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
   const removeAttachment = useCallback((key: string) => {
     setAttachments((current) => current.filter((item) => item.key !== key));
   }, []);
+
+  // 드래그 앤 드롭 — 대화 영역 어디에 놓아도 첨부됩니다. 파일이 아닌 드래그(텍스트 선택 등)는 무시합니다.
+  const [dragOver, setDragOver] = useState(false);
+  const dragDepth = useRef(0);
+  const hasFiles = (event: React.DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes('Files');
+  const onDragEnter = (event: React.DragEvent) => { if (!hasFiles(event)) return; event.preventDefault(); dragDepth.current += 1; setDragOver(true); };
+  const onDragOver = (event: React.DragEvent) => { if (!hasFiles(event)) return; event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; };
+  const onDragLeave = (event: React.DragEvent) => { if (!hasFiles(event)) return; dragDepth.current = Math.max(0, dragDepth.current - 1); if (dragDepth.current === 0) setDragOver(false); };
+  const onDrop = (event: React.DragEvent) => {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    dragDepth.current = 0; setDragOver(false);
+    void addAttachmentFiles(Array.from(event.dataTransfer.files ?? []));
+  };
 
   // 다른 창에 다녀오면 그 사이 바뀐 카드를 반영합니다.
   useEffect(() => {
@@ -2072,7 +2091,8 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
         {!currentMission && threadId === NEW_THREAD && <p className="chat-tasks-empty">{t("첫 메시지를 보내면 임무가 만들어지고, 이 스레드의 대화와 업무가 여기에 묶입니다.")}</p>}
       </div>
     </aside>
-      <section className="conversation"><header><span style={{ background: selectedAgent?.color || 'var(--c-inverse)' }}>{selectedAgent?.isManager || !selectedAgent ? <Bot size={17} aria-hidden="true" /> : selectedAgent.name[0]}</span><div><strong>{selectedAgent?.name || t("에이전트를 선택하세요")}</strong><small>{selectedAgent ? t(selectedAgent.role) : t("프로젝트 참여 에이전트")}{currentMission ? ` · ${currentMission.title}` : threadId === NEW_THREAD ? ` · ${t("새 임무")}` : ''}</small></div>{(() => {
+      <section className={dragOver ? 'conversation drag-over' : 'conversation'} onDragEnter={onDragEnter} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
+        {dragOver && <div className="drop-hint" aria-hidden="true"><FileText size={22} /> {t("여기에 놓으면 첨부됩니다")}</div>}<header><span style={{ background: selectedAgent?.color || 'var(--c-inverse)' }}>{selectedAgent?.isManager || !selectedAgent ? <Bot size={17} aria-hidden="true" /> : selectedAgent.name[0]}</span><div><strong>{selectedAgent?.name || t("에이전트를 선택하세요")}</strong><small>{selectedAgent ? t(selectedAgent.role) : t("프로젝트 참여 에이전트")}{currentMission ? ` · ${currentMission.title}` : threadId === NEW_THREAD ? ` · ${t("새 임무")}` : ''}</small></div>{(() => {
           const working = projectBackground.map((item) => item.agent);
           const state = sending ? 'running' : working.length ? 'running' : 'idle';
           const label = sending ? t("답변 작성 중") : working.length ? tf("팀원 작업 중 — {0}", Array.from(new Set(working)).join(', ')) : t("대화 가능");
