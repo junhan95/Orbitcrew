@@ -13,7 +13,7 @@
 // ── File System Access API 최소 타입 ────────────────────────────────
 // lib.dom 에 showDirectoryPicker / values() / queryPermission 이 없어서 직접 좁게 선언합니다.
 type FsPermissionMode = { mode: 'read' | 'readwrite' };
-export type FsFileHandle = { kind: 'file'; name: string; getFile(): Promise<File>; createWritable(): Promise<{ write(data: string): Promise<void>; close(): Promise<void>; abort(): Promise<void> }> };
+export type FsFileHandle = { kind: 'file'; name: string; getFile(): Promise<File>; createWritable(): Promise<{ write(data: string | Blob): Promise<void>; close(): Promise<void>; abort(): Promise<void> }> };
 export type FsDirHandle = {
   kind: 'directory';
   name: string;

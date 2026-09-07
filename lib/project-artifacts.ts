@@ -53,5 +53,9 @@ export function isBrowserViewable(path: string): boolean {
 
 export function mimeOf(path: string): string {
   const ext = path.toLowerCase().split('.').pop() ?? '';
-  return ({ html: 'text/html', htm: 'text/html', svg: 'image/svg+xml', pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', md: 'text/markdown', txt: 'text/plain', json: 'application/json', css: 'text/css', js: 'text/javascript' } as Record<string, string>)[ext] ?? 'text/plain';
+  return ({
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', doc: 'application/msword',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', xls: 'application/vnd.ms-excel', csv: 'text/csv',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', ppt: 'application/vnd.ms-powerpoint',
+    html: 'text/html', htm: 'text/html', svg: 'image/svg+xml', pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', md: 'text/markdown', txt: 'text/plain', json: 'application/json', css: 'text/css', js: 'text/javascript' } as Record<string, string>)[ext] ?? 'text/plain';
 }

@@ -7,7 +7,33 @@ import { readLocalFile } from '@/lib/local-files';
 import { validateFileChange } from '@/lib/ai-file-changes';
 import { applyFileRows, type FileRow } from '@/lib/ai-file-storage';
 import { folderApproval } from '@/lib/folder-permissions';
-import { recordArtifact } from '@/lib/project-artifacts';
+import { isBrowserViewable, mimeOf, recordArtifact } from '@/lib/project-artifacts';
+import { fileSegments } from '@/lib/local-files';
+import { downloadBlob } from '@/lib/office-files';
+
+/** 저장된 파일을 폴더 권한으로 읽어 엽니다 — 오피스·CSV 는 내려받아 운영체제 앱으로, HTML·이미지·PDF 는 새 탭으로. */
+async function openSavedFile(root: Root, path: string) {
+  const parts = fileSegments(path);
+  let dir = root.handle;
+  for (const part of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(part);
+  const file = await (await dir.getFileHandle(parts[parts.length - 1])).getFile();
+  const blob = new Blob([await file.arrayBuffer()], { type: mimeOf(path) });
+  if (isBrowserViewable(path)) {
+    const url = URL.createObjectURL(blob);
+    window.open(url, '_blank');
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    return;
+  }
+  downloadBlob(path, blob);
+}
+
+function openLabel(path: string): string {
+  const ext = path.toLowerCase().split('.').pop() ?? '';
+  if (ext === 'docx' || ext === 'doc') return 'Word 로 열기';
+  if (ext === 'xlsx' || ext === 'xls' || ext === 'csv') return 'Excel 로 열기';
+  if (ext === 'pptx' || ext === 'ppt') return 'PowerPoint 로 열기';
+  return isBrowserViewable(path) ? '새 탭에서 열기' : '내려받기';
+}
 type Root = { id: string; name: string; handle: FsDirHandle; originals: Map<string, string> };
 type Session = { projectId: string; roots: Root[]; automatic: boolean; received?: boolean };
 type Row = FileRow;
@@ -74,7 +100,12 @@ export function useAIFileChanges(projectId: string) {
 
 function FileBatchView({ batch, apply, cancelBatch, showActions = false }: { showActions?: boolean; batch: Batch; apply: (id: string) => Promise<void>; cancelBatch: (id: string) => void }) { return <section className="ai-file-batch" key={batch.id} aria-label="AI 파일 저장">
     <strong>{batch.busy ? '파일 저장 중…' : batch.canceled ? '파일 변경 취소됨' : batch.rows.every(row => row.status === 'saved') ? '파일 저장 완료' : 'AI 파일 변경 확인'}</strong>
-    {batch.rows.map((row, index) => <details key={index}><summary>{batch.session.roots.find(root => root.id === row.change.folderId)?.name} / {row.change.path} · {row.status === 'saved' ? '저장 완료' : row.status === 'error' ? '저장 실패' : '승인 대기'}</summary>
+    {batch.rows.map((row, index) => <details key={index}><summary>{batch.session.roots.find(root => root.id === row.change.folderId)?.name} / {row.change.path} · {row.status === 'saved' ? '저장 완료' : row.status === 'error' ? '저장 실패' : '승인 대기'}
+      {row.status === 'saved' && <button type="button" className="ai-file-open" onClick={(event) => {
+        event.preventDefault(); event.stopPropagation();
+        const root = batch.session.roots.find(item => item.id === row.change.folderId);
+        if (root) void openSavedFile(root, row.change.path).catch(() => { /* 권한이 바뀌었으면 프로젝트의 결과보기로 엽니다 */ });
+      }}>{t(openLabel(row.change.path))}</button>}</summary>
       <p>{row.error}</p><h4>변경 전</h4><pre>{batch.session.roots.find(root => root.id === row.change.folderId)?.originals.get(row.change.path) ?? '(새 파일)'}</pre><h4>변경 후</h4><pre>{row.change.content}</pre></details>)}
     {showActions && !batch.canceled && batch.rows.some(row => row.status !== 'saved') && <div><button disabled={batch.busy} onClick={() => void apply(batch.id)}>승인하고 저장{batch.rows.some(row => row.status === 'error') ? ' 재시도' : ''}</button><button disabled={batch.busy} onClick={() => cancelBatch(batch.id)}>취소</button></div>}
     <output aria-live="polite">{batch.rows.filter(row => row.status === 'saved').length} / {batch.rows.length}개 저장됨</output>

@@ -10,9 +10,10 @@
 
 /** 텍스트 도구(save_project_file)로 만들 수 있는 형식. 바이너리(PDF·xlsx·docx)는 직접 만들 수 없어 대체 형식을 씁니다. */
 export const DELIVERABLE_FORMATS = [
-  { key: 'word', label: '워드', ext: '.doc', note: 'Word 에서 열리는 HTML 기반 문서 — <html> 전체 문서로 작성' },
+  { key: 'word', label: '워드', ext: '.docx', note: 'content 는 <html> 전체 문서(h1~h3·p·ul/ol·table·b/i 사용) — 시스템이 실제 Word 파일로 변환' },
+  { key: 'excel', label: '엑셀', ext: '.xlsx', note: 'content 는 CSV(UTF-8). 시트가 여러 개면 `## 시트: 이름` 줄로 구분 — 시스템이 실제 Excel 파일로 변환' },
+  { key: 'powerpoint', label: '파워포인트', ext: '.pptx', note: 'content 는 마크다운 슬라이드: `---` 로 슬라이드 구분, 첫 줄 `# 제목`, `- 불릿`, `> 발표자 노트` — 시스템이 실제 PowerPoint 파일로 변환' },
   { key: 'pdf', label: 'PDF', ext: '.html', note: '.html 로 만들고 결과에 "브라우저에서 열어 인쇄 → PDF 로 저장" 안내' },
-  { key: 'excel', label: '엑셀', ext: '.csv', note: 'UTF-8 CSV (엑셀에서 바로 열림). 시트 여러 개면 파일 여러 개' },
   { key: 'html', label: 'HTML', ext: '.html', note: "'결과보기' 에서 바로 렌더링됨. 스타일은 인라인" },
   { key: 'markdown', label: '마크다운', ext: '.md', note: '문서·보고서 기본값' },
   { key: 'text', label: '텍스트', ext: '.txt', note: '' },
@@ -34,7 +35,7 @@ export const REPORT_RULES = [
 export const FILE_RULES = [
   '## 파일 생성 규칙 (산출물은 파일로)',
   '- 보고서·문서·표·코드 같은 산출물은 반드시 save_project_file 로 연결된 작업 폴더에 파일로 저장합니다. 결과 요약(complete_task summary)이나 본문에 전문을 붙이지 마세요 — 저장한 파일 경로와 핵심 요약(3~5줄)만 적습니다. 사용자는 그 파일을 프로젝트의 \'결과보기\' 로 바로 엽니다.',
-  `- 형식은 카드 본문에 지정된 것을 따릅니다. 만들 수 있는 형식: ${DELIVERABLE_FORMATS.map((item) => `${item.label} ${item.ext}${item.note ? ` (${item.note})` : ''}`).join(' · ')}. PDF·xlsx·docx 같은 바이너리는 직접 만들 수 없으니 위의 대체 형식으로 만들고 결과에 그 사실을 한 줄 적습니다.`,
+  `- 형식은 카드 본문에 지정된 것을 따릅니다. 만들 수 있는 형식: ${DELIVERABLE_FORMATS.map((item) => `${item.label} ${item.ext}${item.note ? ` (${item.note})` : ''}`).join(' · ')}. 워드·엑셀·파워포인트는 확장자를 .docx/.xlsx/.pptx 로 두고 content 에 위의 텍스트 원본을 넣으면 시스템이 실제 오피스 파일로 변환합니다 (.doc/.xls/.ppt 같은 옛 확장자는 쓰지 마세요). PDF 만 직접 만들 수 없어 .html 로 만들고 인쇄 저장을 안내합니다.`,
   '- 하나의 산출물은 하나의 파일. 기존 파일을 고칠 때는 전체 내용을 다시 제출합니다(부분 조각 금지). 파일당 200KB 까지.',
   '- 형식이 지정되지 않았으면 문서는 .md, 표는 .csv, 화면은 .html 로 만들고 결과에 "형식 미지정 — 기본값 사용" 을 적습니다.',
   '- 저장 도구가 없으면(연결된 폴더 없음) 결과 본문에 전문을 넣고, next_actions 에 "작업 폴더 연결 후 파일 저장" 을 적습니다.',
@@ -48,12 +49,12 @@ export const FILE_RULES = [
 export function requiresFileDeliverable(title: string, description: string): boolean {
   if (/(검토|QA|리뷰|review)/i.test(title)) return false;
   const text = `${title}\n${description}`;
-  return /\.(docx?|md|html?|csv|txt|pdf|xlsx?)\b|워드|엑셀|PDF|마크다운|HTML|파일로\s*(저장|만들|작성|생성)|파일\s*형식|저장\s*폴더/i.test(text);
+  return /\.(docx?|md|html?|csv|txt|pdf|xlsx?|pptx?)\b|워드|엑셀|파워포인트|PPT|PDF|마크다운|HTML|파일로\s*(저장|만들|작성|생성)|파일\s*형식|저장\s*폴더/i.test(text);
 }
 
 /** 매니저 — 형식 확인·brief 명시·최종 안내 규칙 */
 export const MANAGER_DELIVERABLE_RULES = [
-  `- 산출물 형식 확인: 임무 지시에 결과물의 파일 형식(${FORMAT_CHOICES})이 없으면 위임하기 전에 사용자에게 어떤 형식으로 만들지 물어보고 답을 기다리세요 (선택지를 한 줄로 제시). 코드처럼 형식이 자명하거나 사용자가 "알아서" 라고 했으면 묻지 않고 기본값(문서 .md, 표 .csv, 화면 .html)을 씁니다. PDF 는 .html 로 만든 뒤 인쇄 저장, 워드는 .doc(HTML 기반), 엑셀은 .csv 로 만든다는 점을 사용자에게 한 줄로 알립니다.`,
+  `- 산출물 형식 확인: 임무 지시에 결과물의 파일 형식(${FORMAT_CHOICES})이 없으면 위임하기 전에 사용자에게 어떤 형식으로 만들지 물어보고 답을 기다리세요 (선택지를 한 줄로 제시). 코드처럼 형식이 자명하거나 사용자가 "알아서" 라고 했으면 묻지 않고 기본값(문서 .md, 표 .csv, 화면 .html)을 씁니다. 워드(.docx)·엑셀(.xlsx)·파워포인트(.pptx)는 실제 오피스 파일로 만들어지고, PDF 만 .html 로 만든 뒤 인쇄 저장으로 안내한다는 점을 필요할 때 한 줄로 알립니다.`,
   '- 위임 brief 에는 산출물의 파일명·형식·저장 폴더와 "결과는 파일로 저장하고 요약만 보고" 를 반드시 명시하세요. 팀원이 파일 대신 본문으로만 보고했으면 파일로 저장하도록 한 번 더 맡기세요.',
   "- 최종 안내에는 저장된 파일 경로를 적고, 프로젝트 상세의 '결과보기' 버튼으로 바로 열 수 있다고 알리세요. 파일 전문을 대화에 다시 붙이지 마세요.",
 ].join('\n');
