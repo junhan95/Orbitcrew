@@ -15,6 +15,7 @@ import { agentCommentInsert } from './run-loop';
 import { usageInsert } from './usage';
 import { atomicBatch, isPreconditionError } from './atomic';
 import { traceEvent, withTrace } from './telemetry';
+import { syncMissionStatus } from './mission';
 
 export const REVIEW_POLICY_SKILL_NAME = '검토 정책';
 export const MAX_NITS = 5;
@@ -195,6 +196,7 @@ async function runTaskReviewInternal(params: ReviewParams): Promise<ReviewResult
     traceEvent('review.skipped', { reason: 'target_changed_or_deleted' });
     return { skipped: '검토 대상이 변경되었거나 삭제됨' };
   }
+  await syncMissionStatus(db, userId, taskId).catch(() => undefined);
   return review;
 }
 

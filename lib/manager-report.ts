@@ -9,8 +9,8 @@ import type { RunTaskSuccess } from './run-task';
 const REPORT_MAX_CHARS = 6_000;
 
 export async function reportToManagerChat(db: D1Database, userId: string, taskId: string, outcome: RunTaskSuccess): Promise<{ delivered: boolean; agentId?: string }> {
-  const task = await db.prepare('SELECT title, owner, project_id AS projectId FROM tasks WHERE id = ? AND user_id = ?').bind(taskId, userId)
-    .first<{ title: string; owner: string; projectId: string | null }>();
+  const task = await db.prepare('SELECT title, owner, project_id AS projectId, parent_task_id AS parentTaskId FROM tasks WHERE id = ? AND user_id = ?').bind(taskId, userId)
+    .first<{ title: string; owner: string; projectId: string | null; parentTaskId: string | null }>();
   if (!task?.projectId) return { delivered: false };
   const manager = await db.prepare('SELECT id, name FROM agents WHERE user_id = ? AND project_id = ? AND is_manager = 1 LIMIT 1').bind(userId, task.projectId)
     .first<{ id: string; name: string }>();
@@ -33,8 +33,9 @@ export async function reportToManagerChat(db: D1Database, userId: string, taskId
   const id = crypto.randomUUID();
   const now = Date.now();
   await db.batch([
-    db.prepare('INSERT INTO chat_messages (id, user_id, project_id, agent_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .bind(id, userId, task.projectId, manager.id, 'assistant', content, now),
+    // 보고는 위임이 나간 임무 스레드로 들어갑니다 (부모 카드가 없으면 일반 대화).
+    db.prepare('INSERT INTO chat_messages (id, user_id, project_id, agent_id, role, content, created_at, task_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .bind(id, userId, task.projectId, manager.id, 'assistant', content, now, task.parentTaskId),
     chatMessageIndex(db, { userId, messageId: id, projectId: task.projectId, agentName: manager.name, role: 'assistant', content, createdAt: now }),
   ]);
   return { delivered: true, agentId: manager.id };

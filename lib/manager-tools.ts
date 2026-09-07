@@ -13,6 +13,7 @@ import type { ClaudeCredential, ToolDefinition } from '@/lib/claude';
 import { runTask } from '@/lib/run-task';
 import { type Priority, toPriority } from '@/lib/priority';
 import { recallDocUpsert } from '@/lib/recall';
+import { syncMissionStatus } from '@/lib/mission';
 
 export const MAX_RECRUITS = 4;
 export const MAX_DELEGATIONS = 4;
@@ -169,6 +170,7 @@ async function createWorkerCard(context: ManagerContext, member: MemberRow, para
       content: `[${params.label}] ${params.title} — 담당 ${member.name} (${context.managerName} 위임)\n${params.brief}`, createdAt: now,
     }),
   ]);
+  if (context.managerTaskId) await syncMissionStatus(db, userId, taskId);
   return taskId;
 }
 

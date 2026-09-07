@@ -18,6 +18,7 @@ import { runInBackground, runMemoryReview } from '@/lib/memory-review';
 import { resolveAgentModel } from '@/lib/models';
 import { RECALL_TOOL, executeRecallTool, recallDocUpsert } from '@/lib/recall';
 import { runTaskReview } from '@/lib/reviewer';
+import { syncMissionStatus } from '@/lib/mission';
 import { addTrace, traceEvent, traceError, withTrace } from '@/lib/telemetry';
 import { agentCommentInsert, checkCircuitBreaker, describeTaskCard, formatRunComment } from '@/lib/run-loop';
 import { SAVE_SKILL_TOOL, SKILL_GUIDANCE, USE_SKILL_TOOL, executeSkillTool, listSkills, renderSkillIndex, type SkillToolContext } from '@/lib/skills';
@@ -261,6 +262,8 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
     db.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND user_id = ?')
       .bind('진행 중', startedAt, task.id, user.userId),
   ]);
+  // 팀원 카드가 움직이면 부모 임무 카드의 상태도 따라갑니다.
+  await syncMissionStatus(db, user.userId, task.id).catch(() => undefined);
 
   type Completion = { status: 'completed' | 'blocked'; summary: string; blockedReason: string | null; nextActions: string[]; proof: string[] };
   // 클로저 안에서 채워지므로 객체로 감쌉니다 (TS 흐름 분석이 let 재할당을 못 봅니다)
@@ -408,6 +411,7 @@ async function runTaskInternal(params: RunTaskParams): Promise<RunTaskFailure | 
       }),
     ]);
 
+    await syncMissionStatus(db, user.userId, task.id).catch(() => undefined);
     // 관제 밴드 — 실패율·근거 없음·검토 수정 요청·게이트 차단·비용을 기준선과 비교, 이탈하면 매니저에게 진단 카드 (시간당 1회).
     runInBackground(() => maybeRunHealthCheck(db, user.userId), 'health.review');
     // 결과 검토 — 작성자가 아닌 다른 에이전트가 세 패스(버그·스펙·정책·근거)로 검토해 댓글과 판정을 남깁니다 (백그라운드).

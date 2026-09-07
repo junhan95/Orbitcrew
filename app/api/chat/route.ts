@@ -9,6 +9,7 @@ import { runInBackground, runMemoryReview } from '@/lib/memory-review';
 import { runClaudeAgent } from '@/lib/claude';
 import { resolveAgentModel } from '@/lib/models';
 import { usageInsert } from '@/lib/usage';
+import { THREAD_WHERE, resolveMission } from '@/lib/mission';
 
 type ChatRow = { id: string; role: 'user' | 'assistant'; content: string; createdAt: number };
 
@@ -22,13 +23,16 @@ async function handleGET(request: Request) {
   const url = new URL(request.url);
   const projectId = url.searchParams.get('projectId');
   const agentId = url.searchParams.get('agentId');
+  // 스레드(임무 카드 id). 비어 있으면 스레드 없는 일반 대화만.
+  let threadId = url.searchParams.get('taskId') ?? '';
   if (!projectId || !agentId) return Response.json({ messages: [], summary: null });
   const db = getDatabase();
+  if (threadId) threadId = (await resolveMission(db, user.userId, projectId, threadId))?.id ?? '';
   // 요약(chat_summaries)이 있으면 그 이후 메시지만 원문으로 보내고, 요약은 배너용으로 함께 돌려줍니다.
-  const summary = await loadChatSummary(db, user.userId, projectId, agentId);
+  const summary = await loadChatSummary(db, user.userId, projectId, agentId, threadId);
   const messages = await db
-    .prepare('SELECT id, role, content, created_at AS createdAt FROM chat_messages WHERE user_id = ? AND project_id = ? AND agent_id = ? ORDER BY created_at DESC LIMIT 200')
-    .bind(user.userId, projectId, agentId).all<ChatRow>();
+    .prepare(`SELECT id, role, content, created_at AS createdAt FROM chat_messages WHERE user_id = ? AND project_id = ? AND agent_id = ? AND ${THREAD_WHERE} ORDER BY created_at DESC LIMIT 200`)
+    .bind(user.userId, projectId, agentId, threadId).all<ChatRow>();
   return Response.json({ messages: messages.results.reverse(), summary });
 }
 

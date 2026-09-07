@@ -15,6 +15,7 @@
  *   // 저장 시 chatMessageIndex(...) 를 batch 에 함께 넣어 회상 인덱스에 반영합니다.
  */
 import type { Autonomy } from './autonomy';
+import { THREAD_WHERE, loadMissionChildren, renderMissionSection, resolveMission, type MissionRow } from './mission';
 import type { ClaudeCredential, ClaudeMessage, ToolDefinition, ToolExecutor } from './claude';
 import { CONTEXT_MAX_MESSAGES, loadChatSummary, renderChatSummary, type ChatSummary } from './compaction';
 import {
@@ -92,6 +93,8 @@ export type PreparedChatTurn = {
   canDelegate: boolean;
   /** 팀원 이름 (매니저 제외) — 답변의 '위임했다' 주장 검증용 */
   teamNames: string[];
+  /** 이 스레드가 묶인 임무 카드 (없으면 null) */
+  mission: MissionRow | null;
   /** 매니저 대화 여부 — 라우트가 반복 상한·토큰 상한을 올리는 데 씁니다 */
   isManager: boolean;
 };
@@ -152,21 +155,24 @@ export function buildChatSystem(context: ChatContext, historyWindow = CHAT_HISTO
  */
 export async function prepareChatTurn(db: D1Database, userId: string, params: {
   projectId: string; agentId: string; context: ChatContext; historyWindow?: number;
+  /** 스레드(임무 카드 id). '' 또는 생략이면 일반 대화. */
+  taskId?: string;
   /** 상대가 이 프로젝트의 매니저일 때만 넘기세요. 채용·위임·카드 생성 도구가 붙습니다. */
   manager?: ChatManagerOptions | null;
 }): Promise<PreparedChatTurn> {
   const window = params.historyWindow ?? CHAT_HISTORY_WINDOW;
   // 압축 요약이 있으면 요약이 끝나는 지점 이후의 메시지만 원문으로 넣습니다 (없으면 최근 window 개).
-  const summary = await loadChatSummary(db, userId, params.projectId, params.agentId);
+  const threadId = params.taskId ?? '';
+  const summary = await loadChatSummary(db, userId, params.projectId, params.agentId, threadId);
   const since = summary?.coversTo ?? 0;
   const limit = summary ? CONTEXT_MAX_MESSAGES : window;
   const [history, sinceCount, userTurns, memory, skills, profile] = await Promise.all([
-    db.prepare('SELECT id, role, content FROM chat_messages WHERE user_id = ? AND project_id = ? AND agent_id = ? AND created_at > ? ORDER BY created_at DESC LIMIT ?')
-      .bind(userId, params.projectId, params.agentId, since, limit).all<{ id: string; role: string; content: string }>(),
-    db.prepare('SELECT COUNT(*) AS n FROM chat_messages WHERE user_id = ? AND project_id = ? AND agent_id = ? AND created_at > ?')
-      .bind(userId, params.projectId, params.agentId, since).first<{ n: number }>(),
-    db.prepare("SELECT COUNT(*) AS n FROM chat_messages WHERE user_id = ? AND project_id = ? AND agent_id = ? AND role = 'user'")
-      .bind(userId, params.projectId, params.agentId).first<{ n: number }>(),
+    db.prepare(`SELECT id, role, content FROM chat_messages WHERE user_id = ? AND project_id = ? AND agent_id = ? AND ${THREAD_WHERE} AND created_at > ? ORDER BY created_at DESC LIMIT ?`)
+      .bind(userId, params.projectId, params.agentId, threadId, since, limit).all<{ id: string; role: string; content: string }>(),
+    db.prepare(`SELECT COUNT(*) AS n FROM chat_messages WHERE user_id = ? AND project_id = ? AND agent_id = ? AND ${THREAD_WHERE} AND created_at > ?`)
+      .bind(userId, params.projectId, params.agentId, threadId, since).first<{ n: number }>(),
+    db.prepare(`SELECT COUNT(*) AS n FROM chat_messages WHERE user_id = ? AND project_id = ? AND agent_id = ? AND ${THREAD_WHERE} AND role = 'user'`)
+      .bind(userId, params.projectId, params.agentId, threadId).first<{ n: number }>(),
     // 기억 스냅샷: 이 턴 동안 동결됩니다 (Hermes 의 frozen snapshot)
     loadMemoryScopes(db, userId, { projectId: params.projectId, projectName: params.context.projectName, agentId: params.agentId, agentName: params.context.agentName }),
     listSkills(db, userId, params.projectId),
@@ -179,6 +185,9 @@ export async function prepareChatTurn(db: D1Database, userId: string, params: {
   let recallCalls = 0;
 
   // ── 매니저 대화: 업무 카드 실행과 같은 채용·위임 도구를 붙입니다 ──────────
+  // 스레드가 임무 카드에 묶여 있으면 그 카드가 위임의 부모가 되고, 시스템 프롬프트에 '이번 임무' 섹션이 들어갑니다.
+  const mission = threadId ? await resolveMission(db, userId, params.projectId, threadId) : null;
+  const missionChildren = mission ? await loadMissionChildren(db, userId, mission.id) : [];
   const managerLog = createManagerLog();
   const taskLog = createTaskToolLog();
   const managerContext: ManagerContext | null = params.manager ? {
@@ -190,7 +199,7 @@ export async function prepareChatTurn(db: D1Database, userId: string, params: {
     projectDescription: params.context.projectDescription,
     managerName: params.context.agentName,
     // 대화에는 부모 카드가 없습니다.
-    managerTaskId: null,
+    managerTaskId: mission?.id ?? null,
     asyncDelegation: true,
     folderContext: params.manager.folderContext ?? '',
     onEvent: params.manager.onEvent,
@@ -202,9 +211,11 @@ export async function prepareChatTurn(db: D1Database, userId: string, params: {
   const canDelegate = Boolean(managerContext) && (params.manager?.autonomy ?? 'auto') === 'auto';
   const members = managerContext ? await loadMembers(db, userId, params.projectId) : [];
   const teamNames = members.filter((member) => !member.isManager).map((member) => member.name);
-  const managerSection = managerContext
-    ? `${canDelegate ? MANAGER_CHAT_RULES : MANAGER_TASKS_ONLY_RULES}\n\n${renderTeam(members)}`
-    : '';
+  const missionSection = renderMissionSection(mission, missionChildren);
+  const managerSection = [
+    managerContext ? `${canDelegate ? MANAGER_CHAT_RULES : MANAGER_TASKS_ONLY_RULES}\n\n${renderTeam(members)}` : '',
+    missionSection,
+  ].filter(Boolean).join('\n\n');
 
   return {
     system: buildChatSystem(params.context, window, renderMemorySection(memory), renderChatSummary(summary), renderSkillIndex(skills), managerSection, renderProfileSection(profile, '')),
@@ -244,6 +255,7 @@ export async function prepareChatTurn(db: D1Database, userId: string, params: {
     taskLog,
     canDelegate,
     teamNames,
+    mission,
     isManager: Boolean(managerContext),
   };
 }

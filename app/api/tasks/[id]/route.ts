@@ -2,6 +2,7 @@ import { getCurrentUser } from '@/app/auth';
 import { getDatabase } from '@/db';
 import { isPriority } from '@/lib/priority';
 import { isReviewStatus, isTaskStatus } from '@/lib/task-status';
+import { syncMissionStatus } from '@/lib/mission';
 import { recallDocDelete, recallDocUpsert } from '@/lib/recall';
 
 type RouteContext = { params: Promise<{ id: string }> | { id: string } };
@@ -75,6 +76,7 @@ export async function PATCH(request: Request, context: RouteContext) {
 
   columns.push('updated_at = ?'); values.push(Date.now());
   await db.prepare(`UPDATE tasks SET ${columns.join(', ')} WHERE id = ? AND user_id = ?`).bind(...values, id, user.userId).run();
+  if (body.status !== undefined) await syncMissionStatus(db, user.userId, id).catch(() => undefined);
 
   const task = await db.prepare(SELECT_TASK).bind(id, user.userId).first<TaskRow>();
   if (task) {
