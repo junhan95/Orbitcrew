@@ -88,8 +88,8 @@ export function WorkspaceView({ section, displayName, email, onNotice, chatTarge
   section: WorkspaceSection; displayName: string; email: string; onNotice: (message: string) => void;
   chatTarget?: ChatTarget | null; onOpenChat?: (target: Omit<ChatTarget, 'key'>) => void;
   /** 프로젝트 화면이 이 프로젝트 상세로 바로 들어가야 할 때 (대화의 '프로젝트 바로가기'). key 가 바뀔 때마다 다시 엽니다. */
-  projectTarget?: { projectId: string; key: number } | null;
-  onOpenProject?: (projectId: string) => void;
+  projectTarget?: { projectId: string; taskId?: string; key: number } | null;
+  onOpenProject?: (projectId: string, taskId?: string) => void;
   /** 계정 화면에서 프로필을 저장했을 때 — 사이드바 아바타·인사말을 바로 맞춥니다. */
   onProfileSaved?: (next: { displayName: string; email: string; avatar: string }) => void;
 }) {
@@ -256,7 +256,7 @@ function ProjectFolders({ projectId, onNotice }: { projectId: string; onNotice: 
   </section>;
 }
 
-function ProjectsView({ projects, agents, assignments, onCreated, onNotice, onOpenChat, projectTarget }: { projects: Project[]; agents: Agent[]; assignments: Assignment[]; onCreated: () => Promise<void>; onNotice: (message: string) => void; onOpenChat?: (target: Omit<ChatTarget, 'key'>) => void; projectTarget?: { projectId: string; key: number } | null }) {
+function ProjectsView({ projects, agents, assignments, onCreated, onNotice, onOpenChat, projectTarget }: { projects: Project[]; agents: Agent[]; assignments: Assignment[]; onCreated: () => Promise<void>; onNotice: (message: string) => void; onOpenChat?: (target: Omit<ChatTarget, 'key'>) => void; projectTarget?: { projectId: string; taskId?: string; key: number } | null }) {
   const [name, setName] = useState(''); const [description, setDescription] = useState('');
   const [saving, setSaving] = useState(false);
   // 새 프로젝트 다이얼로그에서 고른 폴더들. 프로젝트가 만들어진 뒤에 핸들을 저장합니다.
@@ -474,7 +474,8 @@ function ProjectsView({ projects, agents, assignments, onCreated, onNotice, onOp
   const opened = projects.find((project) => project.id === openedId) || null;
   if (opened) return <>
     <ProjectDetail project={opened} agents={agents} assignments={assignments} onBack={() => setOpenedId(null)} onNotice={onNotice}
-      onRename={() => startRename(opened)} onDelete={() => askRemove(opened)} onOpenChat={onOpenChat} />
+      onRename={() => startRename(opened)} onDelete={() => askRemove(opened)} onOpenChat={onOpenChat}
+      focusTask={projectTarget?.projectId === opened.id ? projectTarget : null} />
     {projectDialogs}
   </>;
   return <div className="workspace-view"><ViewHeading eyebrow="Projects" title={t("프로젝트")} description={t("진행 중인 프로젝트와 참여 에이전트를 관리합니다.")} action={action} />
@@ -515,13 +516,20 @@ type BoardColumn = { key: string; title: string; subtitle?: string; color?: stri
  */
 type BoardSection = { key: string; parent: ProjectTask | null; agents: { key: string; name: string; role: string; color: string | undefined; tasks: ProjectTask[] }[] };
 
-function ProjectDetail({ project, agents, assignments, onBack, onNotice, onRename, onDelete, onOpenChat }: { project: Project; agents: Agent[]; assignments: Assignment[]; onBack: () => void; onNotice: (message: string) => void; onRename: () => void; onDelete: () => void; onOpenChat?: (target: Omit<ChatTarget, 'key'>) => void }) {
+function ProjectDetail({ project, agents, assignments, onBack, onNotice, onRename, onDelete, onOpenChat, focusTask }: { focusTask?: { taskId?: string; key: number } | null; project: Project; agents: Agent[]; assignments: Assignment[]; onBack: () => void; onNotice: (message: string) => void; onRename: () => void; onDelete: () => void; onOpenChat?: (target: Omit<ChatTarget, 'key'>) => void }) {
   const [tasks, setTasks] = useState<ProjectTask[]>([]);
   const [fields, setFields] = useState<ProjectField[]>([]);
   const [values, setValues] = useState<Record<string, Record<string, string>>>({});
   const [counts, setCounts] = useState<Record<string, TaskCounts>>({});
   const [loading, setLoading] = useState(true);
-  const [openTaskId, setOpenTaskId] = useState<string | null>(null);
+  const [openTaskId, setOpenTaskId] = useState<string | null>(focusTask?.taskId ?? null);
+  // 대화의 '📥 보고' 링크로 들어오면 그 카드를 바로 엽니다 (key 가 바뀔 때마다).
+  const appliedFocus = useRef<number | null>(focusTask?.key ?? null);
+  useEffect(() => {
+    if (!focusTask?.taskId || focusTask.key === appliedFocus.current) return;
+    appliedFocus.current = focusTask.key;
+    setOpenTaskId(focusTask.taskId);
+  }, [focusTask]);
   const [group, setGroup] = useState<BoardGroup>('담당자');
   // 보드를 다시 읽을 때마다 올라갑니다. 열려 있는 상세 패널도 이 값을 보고 자기 데이터를 새로 읽습니다.
   const [revision, setRevision] = useState(0);
@@ -1534,7 +1542,7 @@ const CHAT_TOOL_LABELS: Record<string, string> = {
   create_task: '업무 카드를 만드는 중…',
 };
 
-function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial, visible = true, onOpenProject }: { projects: Project[]; agents: Agent[]; assignments: Assignment[]; onNotice: (message: string) => void; onRefresh: () => Promise<void>; initial?: ChatTarget | null; visible?: boolean; onOpenProject?: (projectId: string) => void }) {
+function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial, visible = true, onOpenProject }: { projects: Project[]; agents: Agent[]; assignments: Assignment[]; onNotice: (message: string) => void; onRefresh: () => Promise<void>; initial?: ChatTarget | null; visible?: boolean; onOpenProject?: (projectId: string, taskId?: string) => void }) {
   // 업무 카드에서 '대화하기' 로 들어오면 그 문맥으로 시작합니다 (WorkspaceView 가 key 를 바꿔 새로 마운트합니다).
   const [projectId, setProjectId] = useState(initial?.projectId || projects[0]?.id || '');
   const aiFiles = useAIFileChanges(projectId);
@@ -1700,6 +1708,20 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
   }, [messages, streamText, sending, steps, visible]);
 
   useEffect(() => { pinnedRef.current = true; }, [projectId, selectedAgentId]);
+
+  // 보고 메시지의 '결과 보기' 링크(#task/<id>) — 새 탭 대신 프로젝트 상세의 그 업무를 엽니다. (마크다운이 만든 <a> 를 위임으로 가로챕니다)
+  useEffect(() => {
+    const node = listRef.current;
+    if (!node) return;
+    const onClick = (event: MouseEvent) => {
+      const anchor = (event.target as HTMLElement | null)?.closest?.('a[href^="#task/"]') as HTMLAnchorElement | null;
+      if (!anchor || !projectId) return;
+      event.preventDefault();
+      onOpenProject?.(projectId, anchor.getAttribute('href')?.slice('#task/'.length));
+    };
+    node.addEventListener('click', onClick);
+    return () => node.removeEventListener('click', onClick);
+  }, [projectId, onOpenProject]);
 
   useEffect(() => {
     const insert = (event: Event) => { if ((event as CustomEvent<string>).detail === 'insert-example' && !sending) { if (draft.trim()) { onNotice(t('입력한 내용이 있습니다. 예시를 참고해 직접 수정하세요.')); return; } setDraft(tutorialExample()); } };

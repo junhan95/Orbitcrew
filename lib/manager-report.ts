@@ -27,7 +27,7 @@ export async function reportToManagerChat(db: D1Database, userId: string, taskId
   ];
   if (outcome.proof.length) lines.push('', `검증 근거: ${outcome.proof.join(' · ')}`);
   if (outcome.nextActions.length) lines.push('', `다음 단계: ${outcome.nextActions.join(' · ')}`);
-  lines.push('', '_전체 결과는 보드의 카드에서 볼 수 있습니다. 검토가 필요하면 말씀해 주세요._');
+  lines.push('', `_전체 결과: [**'${task.title}' 결과 보기**](#task/${taskId}) — 검토가 필요하면 말씀해 주세요._`);
   const content = lines.join('\n');
 
   const id = crypto.randomUUID();

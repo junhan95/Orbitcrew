@@ -123,7 +123,7 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [chatTarget, setChatTarget] = useState<ChatTarget | null>(null);
   // 대화 화면의 '프로젝트 바로가기' — 프로젝트 화면을 열면서 그 프로젝트 상세로 바로 들어갑니다.
-  const [projectTarget, setProjectTarget] = useState<{ projectId: string; key: number } | null>(null);
+  const [projectTarget, setProjectTarget] = useState<{ projectId: string; taskId?: string; key: number } | null>(null);
   const [selectedResult, setSelectedResult] = useState<Task | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [mountedAt, setMountedAt] = useState<Date | null>(null);
@@ -419,8 +419,8 @@ export default function Home() {
     setChatTarget({ ...target, key: Date.now() });
     goTo('대화');
   }, [goTo]);
-  const openProject = useCallback((projectId: string) => {
-    setProjectTarget({ projectId, key: Date.now() });
+  const openProject = useCallback((projectId: string, taskId?: string) => {
+    setProjectTarget({ projectId, taskId, key: Date.now() });
     goTo('프로젝트');
   }, [goTo]);
 
