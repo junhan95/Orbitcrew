@@ -16,6 +16,7 @@ import { isBrowserViewable, mimeOf, readArtifacts, subscribeArtifacts, type Proj
 import { t, tf } from '@/lib/i18n';
 import { downloadBlob, isOfficePath, renderOfficeFile } from '@/lib/office-files';
 import { openWithOfficeApp } from '@/lib/open-with-app';
+import { bundleHtml, siblingReaderForPickedFile, siblingReaderFromDir, type SiblingReader } from '@/lib/html-bundle';
 
 /** Word·Excel·PowerPoint 등 운영체제 앱으로 여는 파일 — 브라우저는 내려받기로 넘깁니다. */
 const DESKTOP_APP_FILE = /\.(docx?|xlsx?|pptx?|csv)$/i;
@@ -40,13 +41,30 @@ export function useServerArtifacts(projectId: string): ServerArtifact[] {
   return files;
 }
 
-async function openServerFileInNewTab(id: string, path: string) {
+const isHtml = (path: string) => /\.html?$/i.test(path);
+
+/** 서버 보관본의 형제 자원 — 같은 프로젝트의 task_files 에서 경로가 같은 파일을 찾아 읽습니다. */
+async function serverSiblingReader(projectId: string): Promise<SiblingReader> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/files`);
+  const list = response.ok ? ((await response.json() as { files?: ServerArtifact[] }).files ?? []) : [];
+  return async (path) => {
+    const match = list.find((item) => item.path === path);
+    if (!match) return null;
+    const file = await fetch(`/api/task-files/${encodeURIComponent(match.id)}`);
+    const data = await file.json() as { file?: { content: string } };
+    return file.ok && data.file ? new Blob([data.file.content], { type: mimeOf(path) }) : null;
+  };
+}
+
+async function openServerFileInNewTab(id: string, path: string, projectId?: string) {
   const tab = window.open('', '_blank');
   try {
     const response = await fetch(`/api/task-files/${encodeURIComponent(id)}`);
     const data = await response.json() as { file?: { content: string }; error?: string };
     if (!response.ok || !data.file) throw new Error(data.error ?? '파일을 열지 못했습니다.');
-    const url = URL.createObjectURL(new Blob([data.file.content], { type: mimeOf(path) }));
+    // blob: 주소에서는 상대 경로 CSS·JS 가 안 잡히므로 형제 파일을 안에 묶어 넣습니다 (lib/html-bundle).
+    const content = isHtml(path) && projectId ? await bundleHtml(data.file.content, path, await serverSiblingReader(projectId)) : data.file.content;
+    const url = URL.createObjectURL(new Blob([content], { type: mimeOf(path) }));
     if (tab) tab.location.href = url; else window.open(url, '_blank');
     setTimeout(() => URL.revokeObjectURL(url), 60_000);
   } catch (error) { tab?.close(); throw error; }
@@ -76,9 +94,9 @@ function officeAppName(path: string): string {
  * 서버 보관 산출물을 엽니다 — HTML·이미지·PDF 는 새 탭, .docx/.xlsx/.pptx 는 실제 오피스 파일로 변환해 내려받기, CSV 등은 내려받기.
  * 텍스트(.md 등)처럼 화면에서 보여 줘야 하는 파일이면 내용을 돌려주고(false 대신), 호출자가 미리보기를 띄웁니다.
  */
-export async function openServerArtifact(file: Pick<ServerArtifact, 'id' | 'path'>, onNotice: (message: string) => void): Promise<{ opened: true } | { opened: false; text: string }> {
+export async function openServerArtifact(file: Pick<ServerArtifact, 'id' | 'path'>, onNotice: (message: string) => void, projectId?: string): Promise<{ opened: true } | { opened: false; text: string }> {
   // .pdf 의 서버 보관본은 인쇄용 HTML 원본 — 먼저 실제 PDF 로 변환해 내려받습니다.
-  if (isBrowserViewable(file.path) && !isOfficePath(file.path)) { await openServerFileInNewTab(file.id, file.path); return { opened: true }; }
+  if (isBrowserViewable(file.path) && !isOfficePath(file.path)) { await openServerFileInNewTab(file.id, file.path, projectId); return { opened: true }; }
   const response = await fetch(`/api/task-files/${encodeURIComponent(file.id)}`);
   const data = await response.json() as { file?: { content: string }; error?: string };
   if (!response.ok || !data.file) throw new Error(data.error ?? '파일을 열지 못했습니다.');
@@ -115,7 +133,7 @@ export async function openTaskArtifact(projectId: string, taskId: string, onNoti
   const best = ranked[0]?.file;
   // 열 만한 산출물이 없으면(텍스트 결과뿐) 카드 상세에서 결과 본문을 보게 합니다.
   if (!best || !isDeliverable(best.path)) return false;
-  const result = await openServerArtifact(best, onNotice);
+  const result = await openServerArtifact(best, onNotice, projectId);
   return result.opened;
 }
 
@@ -147,8 +165,11 @@ async function readFile(root: FsDirHandle, path: string): Promise<File> {
 async function openInNewTab(folderId: string, path: string) {
   const tab = window.open('', '_blank');
   try {
-    const file = await readFile(await folderHandle(folderId), path);
-    const url = URL.createObjectURL(new Blob([await file.arrayBuffer()], { type: mimeOf(path) }));
+    const root = await folderHandle(folderId);
+    const file = await readFile(root, path);
+    // HTML 은 같은 폴더의 CSS·JS·이미지를 안에 묶어 넣어야 blob: 탭에서도 동작합니다 (lib/html-bundle).
+    const content: Blob | string = isHtml(path) ? await bundleHtml(await file.text(), path, siblingReaderFromDir(root)) : file;
+    const url = URL.createObjectURL(new Blob([content], { type: mimeOf(path) }));
     if (tab) tab.location.href = url; else window.open(url, '_blank');
     setTimeout(() => URL.revokeObjectURL(url), 60_000);
   } catch (error) { tab?.close(); throw error; }
@@ -201,7 +222,7 @@ export function ProjectFileButtons({ projectId, onNotice, spotlightKey = 0 }: { 
         return;
       }
       if (!server) { onNotice(t('저장된 산출물이 아직 없습니다.')); return; }
-      const result = await openServerArtifact(server, onNotice);
+      const result = await openServerArtifact(server, onNotice, projectId);
       if (!result.opened) setPreview({ path: server.path, text: result.text });
     } catch (error) { fail(error, t('파일을 열지 못했습니다.')); }
     finally { setBusy(null); }
@@ -222,7 +243,14 @@ export function ProjectFileButtons({ projectId, onNotice, spotlightKey = 0 }: { 
       const blob = await file.getFile();
       if (isBrowserViewable(file.name)) {
         const tab = window.open('', '_blank');
-        const url = URL.createObjectURL(new Blob([await blob.arrayBuffer()], { type: mimeOf(file.name) }));
+        // 고른 HTML 이 연결 폴더 최상위에 있으면 형제 CSS·JS 를 묶어 넣습니다 (파일 핸들만으로는 폴더를 알 수 없어 이름·크기·시각으로 맞춥니다).
+        let content: Blob | string = blob;
+        if (isHtml(file.name)) {
+          const roots = (await Promise.all(linked.map((item) => folderHandle(item.id).catch(() => null)))).filter((item): item is FsDirHandle => item !== null);
+          const read = await siblingReaderForPickedFile(blob, roots);
+          if (read) content = await bundleHtml(await blob.text(), file.name, read);
+        }
+        const url = URL.createObjectURL(new Blob([content], { type: mimeOf(file.name) }));
         if (tab) tab.location.href = url; else window.open(url, '_blank');
         setTimeout(() => URL.revokeObjectURL(url), 60_000);
         return;

@@ -10,6 +10,7 @@ import { folderApproval } from '@/lib/folder-permissions';
 import { isBrowserViewable, mimeOf, recordArtifact } from '@/lib/project-artifacts';
 import { fileSegments } from '@/lib/local-files';
 import { openOfficeBlob } from '@/components/project-files';
+import { bundleHtml, siblingReaderFromDir } from '@/lib/html-bundle';
 
 /** 저장된 파일을 폴더 권한으로 읽어 엽니다 — 오피스·CSV 는 Word·Excel·PowerPoint 로 바로(안 되면 내려받기), HTML·이미지·PDF 는 새 탭으로. */
 async function openSavedFile(root: Root, path: string, onNotice: (message: string) => void) {
@@ -17,7 +18,9 @@ async function openSavedFile(root: Root, path: string, onNotice: (message: strin
   let dir = root.handle;
   for (const part of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(part);
   const file = await (await dir.getFileHandle(parts[parts.length - 1])).getFile();
-  const blob = new Blob([await file.arrayBuffer()], { type: mimeOf(path) });
+  // HTML 은 같은 폴더의 CSS·JS·이미지를 안에 묶어야 blob: 탭에서 동작합니다 (lib/html-bundle).
+  const content: Blob | string = /\.html?$/i.test(path) ? await bundleHtml(await file.text(), path, siblingReaderFromDir(root.handle)) : file;
+  const blob = new Blob([content], { type: mimeOf(path) });
   if (isBrowserViewable(path)) {
     const url = URL.createObjectURL(blob);
     window.open(url, '_blank');
