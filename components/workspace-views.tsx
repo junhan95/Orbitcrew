@@ -1599,6 +1599,12 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
   // 이 프로젝트에서 팀원이 작업 중인지 — 주기 폴링이 메시지를 다시 읽을지 정할 때 씁니다.
   const backgroundRef = useRef(false);
   useEffect(() => { backgroundRef.current = projectBackground.length > 0; }, [projectBackground]);
+  // 보드 카드와 대조하기 위한 최신 목록 (시작 시각 포함) — 실행 요청(fetch)이 끊겨도 카드 상태로 '작업 중' 표시를 정리합니다.
+  const backgroundListRef = useRef<Array<{ taskId: string; agent: string; title: string; projectId: string }>>([]);
+  const backgroundStartedRef = useRef(new Map<string, number>());
+  useEffect(() => { backgroundListRef.current = background; }, [background]);
+  // 카드 기준으로 '작업 중' 을 걷어낸 뒤에도 매니저의 후속 답변이 도착할 수 있어 잠시 더 메시지를 다시 읽습니다.
+  const chainWatchUntilRef = useRef(0);
   const [messageReload, setMessageReload] = useState(0);
   // '대화하기'·업무 목록에서 넘어온 제안 문장. 입력란에 회색(placeholder)으로만 보이고, 사용자가 아무것도 안 적고 보내면 이 문장이 나갑니다.
   const [suggestion, setSuggestion] = useState(initial?.draft ?? '');
@@ -1656,13 +1662,39 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
     if (next !== threadId) setThreadId(next);
   }, [boardTasks, missions, threadId, projectId, loadedFor]);
 
+  /**
+   * 백그라운드 실행 표시를 서버의 카드 상태와 맞춥니다.
+   * 실행 요청은 서버가 보고 → 자동 진행 → QA 위임까지 이어 돌리느라 몇 분씩 걸리고, 그 사이 연결이 끊기면 응답이 영영 오지 않아
+   * 매니저가 결과를 이미 안내했는데도 '팀원 작업 중' 이 남습니다. 카드가 끝난 상태(검토 중·검토 완료, 또는 막힘)면 표시를 걷어냅니다.
+   * 위임 직후 카드가 아직 '대기' 인 짧은 순간을 오판하지 않도록, 시작 15초 안의 항목은 건드리지 않습니다.
+   */
+  const reconcileBackground = useCallback((tasks: ProjectTask[]) => {
+    const now = Date.now();
+    const finished = backgroundListRef.current.filter((item) => {
+      const started = backgroundStartedRef.current.get(item.taskId) ?? now;
+      if (now - started < 15_000) return false;
+      const task = tasks.find((candidate) => candidate.id === item.taskId);
+      return !!task && (isReviewStatus(task.status) || (task.status === '대기' && !!task.blockedReason));
+    });
+    if (!finished.length) return;
+    const ids = new Set(finished.map((item) => item.taskId));
+    setBackground((current) => current.filter((item) => !ids.has(item.taskId)));
+    setSteps((current) => current.map((step) => {
+      if (step.kind !== 'delegate' || !step.taskId || !ids.has(step.taskId) || step.state !== 'running') return step;
+      const task = tasks.find((candidate) => candidate.id === step.taskId);
+      return task && task.status === '대기' ? { ...step, state: 'blocked', summary: task.blockedReason ?? '' } : { ...step, state: 'completed', summary: task?.summary ?? '' };
+    }));
+    chainWatchUntilRef.current = now + 5 * 60_000;
+    setMessageReload((value) => value + 1);
+  }, []);
+
   const loadBoardTasks = useCallback(() => {
     if (!projectId) return;
     fetch(`/api/tasks?projectId=${encodeURIComponent(projectId)}`)
       .then(async (response) => await response.json() as { tasks?: ProjectTask[] })
-      .then((data) => { setBoardTasks(data.tasks || []); setLoadedFor(projectId); })
+      .then((data) => { const tasks = data.tasks || []; setBoardTasks(tasks); setLoadedFor(projectId); reconcileBackground(tasks); })
       .catch(() => { /* 업무 목록은 보조 정보라 실패해도 대화를 막지 않습니다. */ });
-  }, [projectId]);
+  }, [projectId, reconcileBackground]);
 
   useEffect(() => { loadBoardTasks(); }, [loadBoardTasks]);
   // 상태 점이 실시간에 가깝게 따라가도록, 화면이 보이는 동안 8초마다 업무를 다시 읽습니다.
@@ -1671,7 +1703,7 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
     const timer = setInterval(() => {
       if (document.visibilityState !== 'visible') return;
       loadBoardTasks();
-      if (backgroundRef.current) setMessageReload((value) => value + 1);
+      if (backgroundRef.current || Date.now() < chainWatchUntilRef.current) setMessageReload((value) => value + 1);
     }, 8_000);
     return () => clearInterval(timer);
   }, [visible, projectId, loadBoardTasks]);
@@ -1824,6 +1856,7 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
    */
   async function startBackgroundRun(taskId: string, agent: string, title: string, chainDepth = 0) {
     const runProjectId = projectId;
+    backgroundStartedRef.current.set(taskId, Date.now());
     setBackground((current) => current.some((item) => item.taskId === taskId) ? current : [...current, { taskId, agent, title, projectId: runProjectId }]);
     let outcome: 'completed' | 'blocked' = 'completed';
     let summary = '';
@@ -1882,8 +1915,10 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
       summary = error instanceof Error ? error.message : t("팀원 실행에 실패했습니다.");
       onNotice(tf("{0} 실행 실패: {1}", agent, summary));
     } finally {
+      backgroundStartedRef.current.delete(taskId);
       setBackground((current) => current.filter((item) => item.taskId !== taskId));
-      setSteps((current) => current.map((step) => step.kind === 'delegate' && step.taskId === taskId ? { ...step, state: outcome, summary } : step));
+      // 카드 상태로 이미 정리된 단계(completed/blocked)는 서버가 준 최종 결과로 덮어씁니다.
+      setSteps((current) => current.map((step) => step.kind === 'delegate' && step.taskId === taskId ? { ...step, state: outcome, summary: summary || step.summary } : step));
       setMessageReload((value) => value + 1);
       loadBoardTasks();
       void onRefresh();
