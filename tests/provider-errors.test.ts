@@ -4,8 +4,8 @@ import { describeProviderError } from '@/lib/provider-errors';
 it('Anthropic 잔액 부족은 본인 키 계정 문제임과 두 가지 해결책을 한글로 안내합니다', () => {
   const text = describeProviderError(400, 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.');
   expect(text).toContain('Anthropic API 키의 계정 잔액');
-  expect(text).toContain('Plans & Billing');
-  expect(text).toContain('키를 지우면 orbitcrew 크레딧');
+  expect(text).toContain('platform.claude.com/dashboard');
+  expect(text).toContain('orbitcrew 크레딧');
 });
 
 it('인증·한도·혼잡 오류를 상태 코드로 구분합니다', () => {

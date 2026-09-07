@@ -7,7 +7,7 @@ export function describeProviderError(status: number, message: string | undefine
   const text = (message ?? '').trim();
   const lower = text.toLowerCase();
   if (lower.includes('credit balance is too low') || lower.includes('insufficient credit')) {
-    return '연결한 Anthropic API 키의 계정 잔액이 부족합니다. Anthropic 콘솔(console.anthropic.com → Plans & Billing)에서 충전하거나, 설정에서 키를 지우면 orbitcrew 크레딧으로 실행됩니다.';
+    return '연결한 Anthropic API 키의 계정 잔액이 부족합니다. Claude API 크레딧은 Claude 구독 요금과 별도로 청구되며 platform.claude.com/dashboard 에서 확인·충전할 수 있습니다. 또는 orbitcrew 크레딧을 충전하면 그 크레딧으로 실행됩니다.';
   }
   if (status === 401 || lower.includes('invalid x-api-key') || lower.includes('authentication_error')) {
     return 'Anthropic API 키가 올바르지 않거나 만료되었습니다. 설정에서 키를 다시 등록해 주세요.';

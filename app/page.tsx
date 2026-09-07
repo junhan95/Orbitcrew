@@ -789,7 +789,7 @@ export default function Home() {
           <ul className="credits-options">
             {creditsPrompt?.cause === 'provider'
               ? <>
-                <li><strong>{t('Anthropic 콘솔에서 충전')}</strong><span>{t('console.anthropic.com → Plans & Billing 에서 잔액을 채우면 지금 키로 바로 이어집니다.')}</span></li>
+                <li><strong>{t('Anthropic 콘솔에서 충전')}</strong><span>{t('Claude API 크레딧은 사용 중인 Claude 구독 요금과 별도로 청구되며, Claude 플랫폼 대시보드에서 잔액을 확인하고 충전할 수 있습니다.')} <a href="https://platform.claude.com/dashboard" target="_blank" rel="noopener noreferrer">platform.claude.com/dashboard</a></span></li>
                 <li><strong>{t('orbitcrew 크레딧 충전')}</strong><span>{t('계정 화면에서 키를 지우고 크레딧을 충전하면 그 크레딧으로 실행됩니다.')}</span></li>
               </>
               : <>
@@ -801,7 +801,7 @@ export default function Home() {
             {creditsPrompt?.cause === 'provider'
               ? <>
                 <Button variant="outline" onClick={() => { setCreditsPrompt(null); goTo('계정'); }}>{t('orbitcrew 크레딧 충전')}</Button>
-                <Button onClick={() => { window.open('https://console.anthropic.com/settings/billing', '_blank', 'noopener'); }}>{t('Anthropic 콘솔에서 충전')} <ArrowUpRight size={14} /></Button>
+                <Button onClick={() => { window.open('https://platform.claude.com/dashboard', '_blank', 'noopener'); }}>{t('Anthropic 콘솔에서 충전')} <ArrowUpRight size={14} /></Button>
               </>
               : <>
                 <Button variant="outline" onClick={() => { setCreditsPrompt(null); setApiKeyOpen(true); }}>{t('본인 API 키 연결')}</Button>
