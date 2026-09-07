@@ -1523,24 +1523,36 @@ function AgentsView({ agents, projects, assignments, defaultModel, onCreated, on
  */
 /**
  * 대화 사이드바의 에이전트 상태 점.
- * running(녹색 깜빡임) 업무 진행 중 · done(녹색) 결과가 검토 대기 중 · failed(빨강 깜빡임) 진행 불가/실패 · idle(회색 테두리) 맡은 일 없음.
+ * running(녹색 깜빡임) 업무 진행 중 · done(녹색) 결과가 검토 대기 중 · failed(빨강 깜빡임) 진행 불가/실패 · idle(회색 테두리) 대기.
+ *
+ * 상태는 에이전트가 '지금' 어떤 상태인지를 나타내므로, 맡았던 카드 전부가 아니라 가장 최근 카드 하나로 판단합니다 —
+ * 예전에 막혔던 카드가 있어도 그 뒤에 다시 맡아 끝냈으면 더 이상 빨간색이 아니고, 검토까지 끝난 임무는 회색(대기)으로 돌아갑니다.
  */
 type Presence = 'running' | 'done' | 'failed' | 'idle' | 'complete';
 const PRESENCE_LABEL: Record<Presence, string> = { running: '업무 진행 중', done: '결과 검토 대기', failed: '진행 불가 — 확인 필요', idle: '대기 중', complete: '임무 완료' };
-function agentPresence(name: string, tasks: ProjectTask[], busy: boolean): Presence {
-  const mine = tasks.filter((task) => task.owner === name);
-  if (mine.some((task) => task.blockedReason && !isReviewStatus(task.status))) return 'failed';
-  if (busy || mine.some((task) => task.status === '진행 중')) return 'running';
-  if (mine.some((task) => isReviewStatus(task.status))) return 'done';
+const PRESENCE_RANK: Record<Presence, number> = { idle: 0, complete: 0, done: 1, running: 2, failed: 3 };
+/** 카드 하나의 상태 → 점 색. 검토 완료(끝난 일)는 대기와 같습니다. */
+function taskPresence(task: ProjectTask): Presence {
+  if (task.status === '진행 중') return 'running';
+  if (task.blockedReason && !isReviewStatus(task.status)) return 'failed';
+  if (task.status === '검토 중') return 'done';
   return 'idle';
 }
-/** 매니저는 팀 전체를 봅니다 — 팀원 중 하나라도 진행 중이면 진행, 막힌 팀원이 있으면 실패, 맡긴 일이 전부 검토 단계에 이르렀으면 임무 완료(녹색 체크). */
+/** 에이전트가 맡은 카드 중 가장 최근 것 (진행 중인 카드가 있으면 그것을 우선). */
+function latestTaskOf(name: string, tasks: ProjectTask[]): ProjectTask | undefined {
+  const mine = tasks.filter((task) => task.owner === name);
+  return mine.find((task) => task.status === '진행 중') ?? mine.reduce<ProjectTask | undefined>((best, task) => (!best || (task.updatedAt ?? 0) > (best.updatedAt ?? 0) ? task : best), undefined);
+}
+function agentPresence(name: string, tasks: ProjectTask[], busy: boolean): Presence {
+  if (busy) return 'running';
+  const latest = latestTaskOf(name, tasks);
+  return latest ? taskPresence(latest) : 'idle';
+}
+/** 매니저는 팀 전체를 봅니다 — 팀원 각자의 최근 카드 가운데 가장 급한 상태(막힘 > 진행 > 검토 대기 > 대기)를 따릅니다. 다 끝난 임무는 대기(회색). */
 function managerPresence(tasks: ProjectTask[], sending: boolean, teammatesBusy: boolean): Presence {
-  if (tasks.some((task) => task.blockedReason && !isReviewStatus(task.status))) return 'failed';
-  if (sending || teammatesBusy || tasks.some((task) => task.status === '진행 중')) return 'running';
-  if (tasks.length && tasks.every((task) => task.status === '검토 완료')) return 'complete';
-  if (tasks.some((task) => isReviewStatus(task.status))) return 'done';
-  return 'idle';
+  if (sending || teammatesBusy) return 'running';
+  const owners = Array.from(new Set(tasks.map((task) => task.owner)));
+  return owners.map((owner) => agentPresence(owner, tasks, false)).reduce<Presence>((worst, state) => (PRESENCE_RANK[state] > PRESENCE_RANK[worst] ? state : worst), 'idle');
 }
 
 type ManagerStep =
@@ -2060,9 +2072,11 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
   return <div className="workspace-view chat-page"><ViewHeading eyebrow="Agent Chat" title={t("대화")} description={t("매니저에게 지시하면 대화 중에 팀을 꾸리고 업무를 맡겨 결과까지 가져옵니다.")}
     action={<div className="view-actions"><Button variant="outline" disabled={!projectId || !onOpenProject} onClick={() => { if (projectId) onOpenProject?.(projectId); }}><FolderKanban size={15} /> {t("프로젝트 바로가기")}</Button></div>} />
     <div className="chat-shell"><aside className="chat-context"><label>{t("프로젝트")}<NativeSelect data-tour="chat-project" value={projectId} onChange={(event) => { setProjectId(event.target.value); setAgentId(''); setWantedAgent(''); setThreadId(null); resetConversationView(); }}><NativeSelectOption value="">{t("프로젝트 선택")}</NativeSelectOption>{projects.map((project) => <NativeSelectOption key={project.id} value={project.id}>{project.name}</NativeSelectOption>)}</NativeSelect></label><strong>{t("참여 에이전트")}</strong>{availableAgents.map((agent) => <button data-tour={agent.isManager ? 'chat-manager' : undefined} aria-pressed={selectedAgentId === agent.id} className={selectedAgentId === agent.id ? 'chat-agent active' : 'chat-agent'} key={agent.id} onClick={() => { if (agent.id !== selectedAgentId) resetConversationView(); setAgentId(agent.id); setWantedAgent(''); if (agent.isManager) tutorialEvent('manager-selected'); }}>{(() => {
+                // 임무를 고른 상태면 그 임무의 카드로만 판단합니다 (다른 임무의 지난 카드가 색을 바꾸지 않도록).
+                const scopedTasks = currentMission ? threadTasks : boardTasks;
                 const presence = agent.isManager
-                  ? managerPresence(teamTasks, sending && selectedAgentId === agent.id, projectBackground.length > 0)
-                  : agentPresence(agent.name, boardTasks, projectBackground.some((item) => item.agent === agent.name));
+                  ? managerPresence(currentMission ? threadTasks.filter((task) => task.owner !== managerName) : teamTasks, sending && selectedAgentId === agent.id, projectBackground.length > 0)
+                  : agentPresence(agent.name, scopedTasks, projectBackground.some((item) => item.agent === agent.name));
                 return <i className={`presence ${presence}`} title={t(PRESENCE_LABEL[presence])} aria-label={tf('{0} 상태: {1}', agent.name, t(PRESENCE_LABEL[presence]))}>{presence === 'complete' && <Check size={12} strokeWidth={3} aria-hidden="true" />}</i>;
               })()}<span style={{ background: agent.color }}>{agent.isManager ? <Bot size={17} aria-hidden="true" /> : agent.name[0]}</span><div><b>{agent.name}</b><small>{t(agent.role)}</small></div></button>)}
       <strong className="chat-tasks-title">{t("임무")}<em>{missions.length}</em></strong>
