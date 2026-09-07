@@ -2441,7 +2441,7 @@ function AccountView({ displayName, email, onNotice, onProfileSaved }: {
     <CreditsCard onConnectKey={() => setKeyOpen(true)} onNotice={onNotice} refreshKey={apiKey?.configured} />
 
     <section className="settings-card api-key-card">
-      <div className="settings-title"><KeyRound size={16} /><div><strong>{t('Claude API 키')}</strong><p>{t('키를 연결하면 실행·대화가 이 키로 나가고 크레딧은 차감되지 않습니다. 비용은 본인 Anthropic Console 에 청구됩니다.')}</p></div></div>
+      <div className="settings-title"><KeyRound size={16} /><div><strong>{t('Claude API 키')}</strong><p>{t('키를 연결하면 크레딧을 먼저 쓰고, 잔액이 바닥나면 이 키로 이어서 실행됩니다. 키로 나간 호출의 비용은 본인 Anthropic Console 에 청구됩니다.')}</p></div></div>
       <div className="api-key-row">
         {apiKey?.configured
           ? <><span className="api-key-status ok"><ShieldCheck size={13} /> {t('연결됨')}</span><code>{apiKey.hint}</code></>

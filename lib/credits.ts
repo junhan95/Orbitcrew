@@ -30,8 +30,8 @@ export class BillingBusyError extends Error {
  *
  * 과금 경로
  *   local  : 로컬 단일 사용자 모드(.env 키). 크레딧을 쓰지 않습니다.
- *   byok   : 사용자 본인 키가 등록됨 → 무료. 키가 있으면 언제나 키 우선.
- *   credits: 키 없음 → 크레딧 잔액에서 차감.
+ *   byok   : 사용자 본인 키가 등록됨 → 크레딧을 먼저 쓰고, 잔액이 바닥나면(실행 도중 포함) 본인 키로 이어서 실행. 키로 나간 호출은 과금하지 않음.
+ *   credits: 키 없음 → 크레딧 잔액에서 차감. 바닥나면 멈춤.
  */
 
 export type LedgerKind = 'trial' | 'charge' | 'bonus' | 'usage' | 'refund' | 'adjust';
@@ -192,21 +192,35 @@ export class CreditBilling implements ClaudeBilling {
   private turn = Promise.resolve();
   private releaseTurn: (() => void) | null = null;
 
+  /** 크레딧이 바닥나 본인 키로 넘어갔는지 — 그 뒤 호출은 fallbackKey 로 나가고 과금하지 않습니다. */
+  usingFallback = false;
+
   constructor(
-    readonly apiKey: string,
+    private readonly operatorKey: string,
     private readonly db: D1Database,
     readonly userId: string,
     private balance: CreditBalance,
     private readonly config: CreditRuntimeConfig,
     /** 다른 호출이 크레딧을 잡고 있을 때 기다릴 최대 시간 (테스트는 0). */
     private readonly waitMs: number = BILLING_WAIT_MS,
+    /** 사용자 본인 키 — 크레딧이 바닥나면 이 키로 이어서 실행합니다 (없으면 멈춤). */
+    private readonly fallbackKey: string | null = null,
   ) {}
 
+  /** 지금 호출에 쓸 키 — lib/claude.ts 가 호출마다 다시 읽습니다. */
+  get apiKey(): string { return this.usingFallback && this.fallbackKey ? this.fallbackKey : this.operatorKey; }
   get availableMc(): number { return this.balance.availableMc - this.usedMc; }
   get trialOnly(): boolean { return this.balance.paidMc <= 0; }
 
   resolveModel(model: string): string {
+    if (this.usingFallback) return model;
     return this.trialOnly && !isTrialAllowedModel(model) ? TRIAL_FALLBACK_MODEL : model;
+  }
+
+  private switchToFallback(): boolean {
+    if (!this.fallbackKey) return false;
+    this.usingFallback = true;
+    return true;
   }
 
   async beforeCall(): Promise<void> {
@@ -217,8 +231,10 @@ export class CreditBilling implements ClaudeBilling {
     this.turn = previous.then(() => next);
     await previous;
     this.releaseTurn = release;
+    // 이미 본인 키로 넘어갔으면 예약 없이 그 키로 호출합니다.
+    if (this.usingFallback) return;
     try {
-      // 다른 호출(팀원 백그라운드 실행 등)이 잡고 있으면 잠깐씩 기다렸다 다시 시도합니다. 잔액이 0 이면 바로 멈춥니다.
+      // 다른 호출(팀원 백그라운드 실행 등)이 잡고 있으면 잠깐씩 기다렸다 다시 시도합니다. 잔액이 0 이면 본인 키로 넘어가거나(없으면) 멈춥니다.
       const deadline = Date.now() + this.waitMs;
       let id = '';
       let held: { amount_mc: number } | null = null;
@@ -231,7 +247,10 @@ export class CreditBilling implements ClaudeBilling {
           RETURNING amount_mc`).bind(id, this.userId, id, now, now, this.userId, this.userId, now - CREDIT_HOLD_TTL_MS).first<{ amount_mc: number }>();
         if (held) break;
         const balance = await getBalance(this.db, this.userId);
-        if (balance.balanceMc <= 0) throw new InsufficientCreditsError(balance.availableMc);
+        if (balance.balanceMc <= 0) {
+          if (this.switchToFallback()) return;
+          throw new InsufficientCreditsError(balance.availableMc);
+        }
         if (Date.now() >= deadline) throw new BillingBusyError();
         await sleep(BILLING_POLL_MS);
       }
@@ -243,6 +262,8 @@ export class CreditBilling implements ClaudeBilling {
   }
 
   async onUsage(model: string, usage: ClaudeUsage): Promise<{ stop: boolean }> {
+    // 본인 키로 나간 호출은 크레딧을 차감하지 않습니다 (비용은 Anthropic 콘솔에 청구).
+    if (this.usingFallback) return { stop: false };
     const mc = usageToMc(model, usage, this.config);
     const holdId = this.holdId;
     if (!holdId) throw new Error('크레딧 예약 없이 정산할 수 없습니다.');
@@ -262,7 +283,9 @@ export class CreditBilling implements ClaudeBilling {
     this.balance = balance;
     this.balance.availableMc = balance.balanceMc;
     this.usedMc = mc;
-    return { stop: this.availableMc <= 0 };
+    // 이번 호출로 바닥났으면: 본인 키가 있으면 다음 호출부터 그 키로, 없으면 멈춥니다.
+    if (this.availableMc <= 0) return { stop: !this.switchToFallback() };
+    return { stop: false };
   }
 
   /** Called in finally even after HTTP errors or interrupted streams. Never release another call's hold. */
@@ -286,28 +309,41 @@ export class CreditBilling implements ClaudeBilling {
 /**
  * 이번 요청에서 Claude 를 부를 자격 증명.
  *   local   → .env 키 문자열
- *   byok    → 사용자 키 문자열 (키가 있으면 언제나 키 우선, 과금 없음)
+ *   byok    → 크레딧이 남아 있으면 CreditBilling(본인 키를 fallback 으로) — 크레딧을 먼저 쓰고 바닥나면 본인 키로 이어감.
+ *             크레딧이 이미 0 이거나 운영자 키가 없으면 본인 키 문자열 (과금 없음).
  *   credits → CreditBilling (운영자 키 + 계량). 운영자 키(ANTHROPIC_API_KEY)가 없으면 예전처럼 ApiKeyMissingError.
- * 잔액이 0 이하면 실행 전에 InsufficientCreditsError.
+ * 키도 크레딧도 없으면 실행 전에 InsufficientCreditsError.
  */
 export async function resolveCredential(db: D1Database, userId: string, options: { waitMs?: number } = {}): Promise<ClaudeCredential> {
   const waitMs = options.waitMs ?? BILLING_WAIT_MS;
   if (authMode() === 'local' && env.ANTHROPIC_API_KEY) return env.ANTHROPIC_API_KEY;
   const stored = await loadUserKey(db, userId);
-  if (stored) return stored;
   const operatorKey = env.ANTHROPIC_API_KEY;
-  if (!operatorKey) throw new ApiKeyMissingError();
+  if (!operatorKey) {
+    if (stored) return stored;
+    throw new ApiKeyMissingError();
+  }
   const config = creditConfig();
   await grantTrialCredits(db, userId, config);
   let balance = await getBalance(db, userId);
-  if (balance.balanceMc <= 0) throw new InsufficientCreditsError(balance.availableMc);
+  // 크레딧이 이미 없으면: 본인 키가 있으면 그 키로, 없으면 충전 안내.
+  if (balance.balanceMc <= 0) {
+    if (stored) return stored;
+    throw new InsufficientCreditsError(balance.availableMc);
+  }
   // 다른 호출이 잡고 있으면 잠깐 기다립니다 — 팀원 백그라운드 실행 중에도 매니저와 대화할 수 있어야 합니다.
   const deadline = Date.now() + waitMs;
   while (balance.heldMc > 0) {
-    if (Date.now() >= deadline) throw new BillingBusyError();
+    if (Date.now() >= deadline) {
+      if (stored) return stored;
+      throw new BillingBusyError();
+    }
     await sleep(BILLING_POLL_MS);
     balance = await getBalance(db, userId);
-    if (balance.balanceMc <= 0) throw new InsufficientCreditsError(balance.availableMc);
+    if (balance.balanceMc <= 0) {
+      if (stored) return stored;
+      throw new InsufficientCreditsError(balance.availableMc);
+    }
   }
-  return new CreditBilling(operatorKey, db, userId, balance, config, waitMs);
+  return new CreditBilling(operatorKey, db, userId, balance, config, waitMs, stored);
 }

@@ -157,7 +157,7 @@ export function CreditsCard({ onNotice, onConnectKey, refreshKey }: { onNotice: 
   const description = mode === 'local'
     ? t('로컬 모드 — .env 의 키로 실행되며 크레딧을 쓰지 않습니다.')
     : mode === 'byok'
-      ? t('본인 Anthropic API 키로 실행 중 — 크레딧은 차감되지 않습니다. 키를 지우면 크레딧으로 전환됩니다.')
+      ? t('본인 Anthropic API 키가 연결됨 — 크레딧을 먼저 쓰고, 잔액이 바닥나면 본인 키로 이어서 실행됩니다 (키로 나간 호출은 크레딧을 차감하지 않습니다).')
       : t('연결된 키가 없어 크레딧으로 실행됩니다. 호출마다 실측 토큰만큼 차감됩니다.');
 
   return <section className="settings-card credits-card">
@@ -200,7 +200,7 @@ export function CreditsCard({ onNotice, onConnectKey, refreshKey }: { onNotice: 
         ? (betaExhausted
           ? tf('이번 달 베타 충전 한도를 다 썼습니다. {0} 에 초기화되며, 그 전에는 본인 API 키를 연결해 쓸 수 있습니다.', monthName(beta.resetsAt))
           : (betaCapped
-            ? tf('베타 테스트 결제(토스페이먼츠) — 카드 정보를 넣어도 청구되지 않습니다. 한 달에 {0} 크레딧까지 충전할 수 있고, 남은 베타 크레딧은 베타 종료 시 소멸됩니다. 본인 Claude API 키를 연결하면 한도 없이 그 키로 실행됩니다.', formatCredits(beta.capMc))
+            ? tf('베타 테스트 결제(토스페이먼츠) — 카드 정보를 넣어도 청구되지 않습니다. 한 달에 {0} 크레딧까지 충전할 수 있고, 남은 베타 크레딧은 베타 종료 시 소멸됩니다. 본인 Claude API 키를 연결하면 크레딧이 바닥난 뒤에도 그 키로 이어서 실행됩니다.', formatCredits(beta.capMc))
             : t('베타 테스트 결제(토스페이먼츠) — 카드 정보를 넣어도 청구되지 않습니다. 남은 베타 크레딧은 베타 종료 시 소멸됩니다. 본인 Claude API 키를 연결하면 그 키로 실행됩니다.')))
         : checkout.enabled
           ? t('카드로 결제됩니다(토스페이먼츠). 미사용 유료 크레딧은 아래 결제 목록에서 전액 취소할 수 있고, 무료 · 보너스 크레딧은 환불되지 않습니다.')

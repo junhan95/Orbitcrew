@@ -257,6 +257,8 @@ export async function runClaudeAgent(options: {
 
   for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
     await options.beforeIteration?.();
+    // 과금 핸들이 크레딧 소진으로 본인 키로 넘어갔을 수 있어 호출마다 키·모델을 다시 읽습니다.
+    request.apiKey = credentialKey(options.apiKey); request.model = billing?.resolveModel?.(options.model) ?? options.model;
     const { data, verdict } = await billedRequest(billing, request.model, () => requestMessages(request, conversation));
     usagePerIteration.push(readUsage(data.usage));
     usage = addUsage(usage, readUsage(data.usage));
@@ -462,6 +464,7 @@ export async function streamClaudeAgent(options: StreamOptions): Promise<AgentRu
   const usagePerIteration: ClaudeUsage[] = [];
 
   for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
+    request.apiKey = credentialKey(options.apiKey); request.model = billing?.resolveModel?.(options.model) ?? options.model;
     const { data, verdict } = await billedRequest(billing, request.model, () => streamOnce(request, conversation, options.onDelta));
     usagePerIteration.push(readUsage(data.usage));
     usage = addUsage(usage, readUsage(data.usage));
