@@ -8,7 +8,9 @@ import type { RunTaskSuccess } from './run-task';
 
 const REPORT_MAX_CHARS = 6_000;
 
-export async function reportToManagerChat(db: D1Database, userId: string, taskId: string, outcome: RunTaskSuccess): Promise<{ delivered: boolean; agentId?: string }> {
+export type ReportDelivery = { delivered: boolean; agentId?: string; projectId?: string; threadId?: string; owner?: string; title?: string };
+
+export async function reportToManagerChat(db: D1Database, userId: string, taskId: string, outcome: RunTaskSuccess): Promise<ReportDelivery> {
   const task = await db.prepare('SELECT title, owner, project_id AS projectId, parent_task_id AS parentTaskId FROM tasks WHERE id = ? AND user_id = ?').bind(taskId, userId)
     .first<{ title: string; owner: string; projectId: string | null; parentTaskId: string | null }>();
   if (!task?.projectId) return { delivered: false };
@@ -38,5 +40,5 @@ export async function reportToManagerChat(db: D1Database, userId: string, taskId
       .bind(id, userId, task.projectId, manager.id, 'assistant', content, now, task.parentTaskId),
     chatMessageIndex(db, { userId, messageId: id, projectId: task.projectId, agentName: manager.name, role: 'assistant', content, createdAt: now }),
   ]);
-  return { delivered: true, agentId: manager.id };
+  return { delivered: true, agentId: manager.id, projectId: task.projectId, threadId: task.parentTaskId ?? '', owner: task.owner, title: task.title };
 }

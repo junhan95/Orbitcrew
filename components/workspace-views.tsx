@@ -1578,6 +1578,9 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
   // 대화에서 위임돼 백그라운드로 도는 팀원 실행. 끝나면 매니저 대화에 '📥 보고' 가 도착하고 목록에서 빠집니다.
   const [background, setBackground] = useState<{ taskId: string; agent: string; title: string; projectId: string }[]>([]);
   const projectBackground = useMemo(() => background.filter((item) => item.projectId === projectId), [background, projectId]);
+  // 백그라운드 실행이 끝났을 때 "지금 보고 있는 프로젝트" 를 알기 위한 ref (클로저의 projectId 는 시작 시점 값).
+  const projectIdRef = useRef(projectId);
+  useEffect(() => { projectIdRef.current = projectId; }, [projectId]);
   const [messageReload, setMessageReload] = useState(0);
   // '대화하기'·업무 목록에서 넘어온 제안 문장. 입력란에 회색(placeholder)으로만 보이고, 사용자가 아무것도 안 적고 보내면 이 문장이 나갑니다.
   const [suggestion, setSuggestion] = useState(initial?.draft ?? '');
@@ -1774,7 +1777,7 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
    * 대화에서 위임된 카드를 백그라운드로 실행합니다. 매니저의 답변은 이미 끝나 대화는 열려 있고,
    * 이 요청이 끝나면 서버가 매니저 대화에 '📥 보고' 를 남기므로 메시지를 다시 읽어 보여 줍니다.
    */
-  async function startBackgroundRun(taskId: string, agent: string, title: string) {
+  async function startBackgroundRun(taskId: string, agent: string, title: string, chainDepth = 0) {
     const runProjectId = projectId;
     setBackground((current) => current.some((item) => item.taskId === taskId) ? current : [...current, { taskId, agent, title, projectId: runProjectId }]);
     let outcome: 'completed' | 'blocked' = 'completed';
@@ -1784,13 +1787,31 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
       const folderContext = JSON.stringify(session.roots.map(root => ({ folderId: root.id, name: root.name, files: Object.fromEntries(root.originals) })));
       const response = await fetch('/api/agents/run', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ taskId, reportToManager: true, folderContext }),
+        body: JSON.stringify({ taskId, reportToManager: true, folderContext, chainDepth }),
       });
-      const data = await response.json().catch(() => null) as { error?: string; blocked?: boolean; blockedReason?: string | null; summary?: string } | null;
+      const data = await response.json().catch(() => null) as {
+        error?: string; blocked?: boolean; blockedReason?: string | null; summary?: string;
+        followUp?: { ran: boolean; reason?: string; delegated: Array<{ taskId: string; title: string; agent: string; outcome: string }>; recruited: Array<{ name: string; role: string }> } | null;
+      } | null;
       if (!response.ok) throw new Error(data?.error || t("팀원 실행에 실패했습니다."));
       outcome = data?.blocked ? 'blocked' : 'completed';
       summary = (data?.blocked ? data.blockedReason : data?.summary) || '';
       onNotice(data?.blocked ? tf('{0} 에이전트가 진행 중 문제를 매니저에게 보고했습니다.', agent) : tf('{0} 에이전트가 업무를 완료하고 매니저에게 보고했습니다.', agent));
+      // 매니저 자동 진행: 보고를 받은 매니저가 다음 단계를 진행했으면, 새로 위임된 카드를 이어서 실행합니다 (실행 → 보고 → 자동 진행 사슬).
+      const followUp = data?.followUp;
+      if (followUp?.ran && runProjectId === projectIdRef.current) {
+        for (const member of followUp.recruited) {
+          setSteps((current) => [...current, { id: `r-${member.name}-${current.length}`, kind: 'recruited', agent: member.name, role: member.role }]);
+        }
+        const queued = followUp.delegated.filter((item) => item.outcome === 'queued' && item.taskId);
+        for (const item of queued) {
+          setSteps((current) => [...current, { id: `q-${item.agent}-${current.length}`, kind: 'delegate', agent: item.agent, role: '', title: item.title, state: 'running', taskId: item.taskId }]);
+        }
+        onNotice(queued.length ? tf('매니저가 다음 단계로 {0}에게 업무를 맡겼습니다.', queued.map((item) => item.agent).join(', ')) : t('매니저가 결과를 정리해 안내했습니다.'));
+        for (const item of queued) void startBackgroundRun(item.taskId, item.agent, item.title, chainDepth + 1);
+      } else if (followUp?.ran) {
+        for (const item of followUp.delegated.filter((entry) => entry.outcome === 'queued' && entry.taskId)) void startBackgroundRun(item.taskId, item.agent, item.title, chainDepth + 1);
+      }
     } catch (error) {
       outcome = 'blocked';
       summary = error instanceof Error ? error.message : t("팀원 실행에 실패했습니다.");
