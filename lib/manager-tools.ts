@@ -61,8 +61,29 @@ export const DELEGATE_TOOL: ToolDefinition = {
   },
 };
 
+/**
+ * 팀원이 끝낸 업무의 결과 전문을 읽습니다.
+ * 대화의 '📥 보고' 는 요약뿐이라, 매니저가 검토·재위임 brief 작성에 전문이 필요할 때 씁니다
+ * (예전엔 회상 발췌만 보여 "본문이 잘렸다"고 오해했습니다).
+ */
+export const READ_TASK_TOOL: ToolDefinition = {
+  name: 'read_task_result',
+  description: [
+    '이 프로젝트 보드에 있는 업무 카드의 결과 전문을 읽습니다.',
+    "대화의 '📥 보고' 메시지는 요약이므로, 팀원 결과를 검토하거나 그 내용을 다른 팀원에게 넘길 때는 이 도구로 전문을 먼저 읽으세요.",
+    "task_id 는 보고 메시지의 링크(#task/<id>)나 delegate_task 반환값에 있습니다. 모르면 title 로 찾습니다.",
+  ].join(' '),
+  input_schema: {
+    type: 'object',
+    properties: {
+      task_id: { type: 'string', description: '업무 카드 id (우선)' },
+      title: { type: 'string', description: 'id 를 모를 때 제목(일부 일치)' },
+    },
+  },
+};
+
 export const MANAGER_TOOLS: ToolDefinition[] = [RECRUIT_TOOL, DELEGATE_TOOL];
-export const MANAGER_TOOL_NAMES = new Set(MANAGER_TOOLS.map((tool) => tool.name));
+export const MANAGER_TOOL_NAMES = new Set([...MANAGER_TOOLS, READ_TASK_TOOL].map((tool) => tool.name));
 
 /**
  * 매니저가 일하는 도중 밖으로 흘려보내는 진행 이벤트.
@@ -199,6 +220,27 @@ export async function executeManagerTool(
     log.recruited.push({ name: agentName, role: role.role });
     context.onEvent?.({ kind: 'recruited', agent: agentName, role: role.role });
     return { ok: true, agent_name: agentName, role: role.role, note: '팀에 합류했습니다. delegate_task 로 업무를 맡기세요.' };
+  }
+
+  if (name === 'read_task_result') {
+    const taskId = typeof input.task_id === 'string' ? input.task_id.trim() : '';
+    const title = typeof input.title === 'string' ? input.title.trim() : '';
+    if (!taskId && !title) return { ok: false, error: 'task_id 또는 title 을 주세요.' };
+    type TaskRow = { id: string; title: string; owner: string; status: string; summary: string | null; result: string | null; blockedReason: string | null; description: string };
+    const row = taskId
+      ? await db.prepare('SELECT id, title, owner, status, summary, result, blocked_reason AS blockedReason, description FROM tasks WHERE id = ? AND user_id = ? AND project_id = ?')
+        .bind(taskId, userId, projectId).first<TaskRow>()
+      : await db.prepare('SELECT id, title, owner, status, summary, result, blocked_reason AS blockedReason, description FROM tasks WHERE user_id = ? AND project_id = ? AND title LIKE ? ORDER BY updated_at DESC LIMIT 1')
+        .bind(userId, projectId, `%${title}%`).first<TaskRow>();
+    if (!row) return { ok: false, error: '그런 업무 카드가 이 프로젝트에 없습니다.' };
+    return {
+      ok: true,
+      task_id: row.id, title: row.title, agent: row.owner, status: row.status,
+      summary: row.summary ?? '',
+      blocked_reason: row.blockedReason ?? undefined,
+      result: row.result ? clip(row.result, REPORT_CLIP) : '',
+      note: row.result ? '결과 전문입니다 (잘리지 않았으면 끝까지 그대로입니다).' : '아직 결과가 없습니다 — 팀원이 진행 중이거나 시작 전입니다.',
+    };
   }
 
   if (name === 'delegate_task') {

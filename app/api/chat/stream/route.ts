@@ -8,7 +8,7 @@ import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_TEXT_CHARS, type AttachmentP
 import { credentialErrorResponse, resolveCredential } from '@/lib/credits';
 import type { ClaudeCredential } from '@/lib/claude';
 import { toAutonomy } from '@/lib/autonomy';
-import { MEMORY_REVIEW_EVERY, chatMessageIndex, prepareChatTurn, type ChatContext } from '@/lib/chat-agent';
+import { DELEGATION_MISSING_NOTE, DELEGATION_RETRY_PROMPT, MEMORY_REVIEW_EVERY, chatMessageIndex, claimsDelegation, prepareChatTurn, type ChatContext } from '@/lib/chat-agent';
 import type { ManagerEvent } from '@/lib/manager-tools';
 import { streamClaudeAgent } from '@/lib/claude';
 import { compactConversation, shouldCompact } from '@/lib/compaction';
@@ -198,6 +198,35 @@ async function handlePOST(request: Request) {
           onToolCall: (name) => { send({ type: 'tool', name }); },
         });
         if (!result.text) throw new Error('답변을 생성하지 못했습니다.');
+
+        // 말뿐인 위임 방지: "○○에게 맡겼습니다" 라고 했는데 이번 턴에 delegate_task 성공이 없으면
+        // 도구를 실제로 부르도록 한 번 되묻고, 그래도 없으면 사용자에게 카드가 없다고 알립니다.
+        let delegationMissing = false;
+        if (chat.canDelegate && !chat.managerLog.delegated.length && result.stopReason === 'end_turn' && claimsDelegation(result.text, chat.teamNames)) {
+          const separator = '\n\n';
+          send({ type: 'tool', name: 'delegate_task' });
+          partial += separator; send({ type: 'delta', text: separator });
+          const retry = await streamClaudeAgent({
+            apiKey, model, maxTokens: 8000, maxIterations: 4,
+            system: chat.system,
+            messages: [...chat.messages, { role: 'assistant', content: result.text }, { role: 'user', content: DELEGATION_RETRY_PROMPT }],
+            tools: chat.tools,
+            executeTool: async (name, input) => { await checkpoint(partial); return chat.executeTool(name, input); },
+            onDelta: (text) => { partial += text; send({ type: 'delta', text }); },
+            onToolCall: (name) => { send({ type: 'tool', name }); },
+          });
+          if (retry.text.trim()) result.text = `${result.text}${separator}${retry.text}`;
+          result.usage = {
+            inputTokens: result.usage.inputTokens + retry.usage.inputTokens, outputTokens: result.usage.outputTokens + retry.usage.outputTokens,
+            cacheCreationTokens: result.usage.cacheCreationTokens + retry.usage.cacheCreationTokens, cacheReadTokens: result.usage.cacheReadTokens + retry.usage.cacheReadTokens,
+            webSearchRequests: result.usage.webSearchRequests + retry.usage.webSearchRequests,
+          };
+          if (!chat.managerLog.delegated.length && claimsDelegation(retry.text, chat.teamNames)) {
+            delegationMissing = true;
+            result.text += DELEGATION_MISSING_NOTE;
+            send({ type: 'delta', text: DELEGATION_MISSING_NOTE });
+          }
+        }
         if (result.stopReason === 'insufficient_credits') { const note = '\n\n---\n※ 크레딧 잔액이 부족해 여기서 중단했습니다. 충전하거나 본인 API 키를 연결해 주세요.'; result.text += note; send({ type: 'delta', text: note }); }
 
         assistantMessage.content = result.text;
@@ -215,6 +244,7 @@ async function handlePOST(request: Request) {
           recruited: chat.managerLog.recruited,
           delegated: chat.managerLog.delegated,
           createdTasks: chat.taskLog.createdTasks,
+          delegationMissing,
         });
 
         // 사용자 메시지 N개마다 기억 리뷰, 요약 이후 메시지가 넘치면 대화 압축 — 둘 다 응답을 막지 않습니다.

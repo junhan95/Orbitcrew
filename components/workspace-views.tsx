@@ -1538,7 +1538,8 @@ const CHAT_TOOL_LABELS: Record<string, string> = {
   memory: '기억을 정리하는 중…',
   use_skill: '스킬 문서를 읽는 중…',
   recruit_agent: '필요한 에이전트를 합류시키는 중…',
-  delegate_task: '팀원에게 업무를 맡기고 결과를 기다리는 중…',
+  delegate_task: '팀원에게 업무를 맡기는 중…',
+  read_task_result: '팀원 결과 전문을 읽는 중…',
   create_task: '업무 카드를 만드는 중…',
 };
 
@@ -1816,7 +1817,7 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
           fileChanges?: unknown; type?: string; text?: string; error?: string; code?: string; name?: string; message?: ChatMessage;
           kind?: string; agent?: string; role?: string; title?: string; outcome?: string; summary?: string;
           recruited?: Array<{ name: string; role: string }>; delegated?: Array<{ agent: string; title: string; taskId?: string; outcome?: string }>; createdTasks?: Array<{ title: string }>;
-          taskId?: string;
+          taskId?: string; delegationMissing?: boolean;
         };
         try { event = JSON.parse(trimmed) as typeof event; } catch { return; }
         if (event.type === 'user' && event.message) {
@@ -1889,6 +1890,7 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
             event.createdTasks?.length ? tf("카드 {0}개 생성", event.createdTasks.length) : '',
           ].filter(Boolean);
           if (notes.length) { boardChanged = true; onNotice(notes.join(' · ')); }
+          else if (event.delegationMissing) onNotice(t('매니저의 위임이 실제로 이루어지지 않았습니다 — 보드에 카드가 없습니다. 다시 요청해 주세요.'));
         }
         if (event.type === 'error') { failure = event.error || t("답변 생성에 실패했습니다."); failureCode = event.code; }
       };
