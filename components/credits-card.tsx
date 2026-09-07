@@ -83,6 +83,8 @@ export function CreditsCard({ onNotice, onConnectKey, refreshKey }: { onNotice: 
   const [data, setData] = useState<CreditsData | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
+  // 내역은 최근 몇 건만 보이고, 펼치면 전체가 보입니다.
+  const [ledgerOpen, setLedgerOpen] = useState(false);
 
   const reload = useCallback(() => {
     fetchCredits().then(setData).catch((err) => setError(err instanceof Error ? err.message : t('크레딧 정보를 불러오지 못했습니다.')));
@@ -245,9 +247,9 @@ export function CreditsCard({ onNotice, onConnectKey, refreshKey }: { onNotice: 
     </div> : null}
 
     <div className="credits-ledger">
-      <p className="credits-label">{t('내역')}</p>
+      <p className="credits-label">{t('내역')}{ledger.length > LEDGER_PREVIEW ? <small> · {ledgerOpen ? tf('전체 {0}건', ledger.length) : tf('최근 {0}건', LEDGER_PREVIEW)}</small> : null}</p>
       {ledger.length === 0 ? <p className="credits-hint">{t('아직 내역이 없습니다.')}</p> : <ul>
-        {ledger.map((row) => {
+        {(ledgerOpen ? ledger : ledger.slice(0, LEDGER_PREVIEW)).map((row) => {
           const model = typeof row.meta?.model === 'string' ? shortModel(row.meta.model) : null;
           const webSearch = typeof row.meta?.webSearch === 'number' && row.meta.webSearch > 0 ? row.meta.webSearch : 0;
           return <li key={row.id}>
@@ -262,6 +264,12 @@ export function CreditsCard({ onNotice, onConnectKey, refreshKey }: { onNotice: 
           </li>;
         })}
       </ul>}
+      {ledger.length > LEDGER_PREVIEW && <button type="button" className="credits-ledger-toggle" aria-expanded={ledgerOpen} onClick={() => setLedgerOpen((open) => !open)}>
+        <ChevronDown size={14} className={ledgerOpen ? 'open' : undefined} /> {ledgerOpen ? t('접기') : tf('펼치기 — 전체 {0}건 보기', ledger.length)}
+      </button>}
     </div>
   </section>;
 }
+
+/** 내역 미리보기 건수 — 그 이상은 '펼치기' 로 봅니다. */
+const LEDGER_PREVIEW = 5;

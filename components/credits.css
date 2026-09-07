@@ -44,6 +44,10 @@
 .credits-pay-refunded,.credits-pay-failed,.credits-pay-canceled{color:var(--c-text-muted)}
 .credits-ledger{margin-top:16px;padding-top:14px;border-top:1px solid var(--c-line-soft)}
 .credits-ledger ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+.credits-label small{text-transform:none;letter-spacing:0;font-weight:500}
+.credits-ledger-toggle{margin-top:10px;display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid var(--c-line);border-radius:var(--r-lg);background:transparent;color:var(--c-text-soft);font-size:11px;cursor:pointer}
+.credits-ledger-toggle:hover{background:var(--c-surface-soft);color:var(--c-text)}
+.credits-ledger-toggle svg{transition:transform .18s ease}.credits-ledger-toggle svg.open{transform:rotate(180deg)}
 .credits-ledger li{display:grid;grid-template-columns:76px minmax(0,1fr) auto auto;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--c-line-soft);font-size:12px}
 .credits-ledger li:last-child{border-bottom:0}
 .credits-kind{display:inline-flex;justify-content:center;padding:2px 8px;border-radius:99px;background:var(--c-surface-soft);font-size:10.5px;font-weight:600;color:var(--c-text)}
