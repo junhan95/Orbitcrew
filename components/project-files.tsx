@@ -13,8 +13,9 @@ import { Button } from '@/components/ui/button';
 import { ensureReadPermission, fetchProjectFolders, getHandle, openFolderDialog, type FsDirHandle } from '@/lib/folder-access';
 import { fileSegments, readLocalFile } from '@/lib/local-files';
 import { isBrowserViewable, mimeOf, readArtifacts, subscribeArtifacts, type ProjectArtifact } from '@/lib/project-artifacts';
-import { t } from '@/lib/i18n';
+import { t, tf } from '@/lib/i18n';
 import { downloadBlob, isOfficePath, renderOfficeFile } from '@/lib/office-files';
+import { openWithOfficeApp } from '@/lib/open-with-app';
 
 /** Word·Excel·PowerPoint 등 운영체제 앱으로 여는 파일 — 브라우저는 내려받기로 넘깁니다. */
 const DESKTOP_APP_FILE = /\.(docx?|xlsx?|pptx?|csv)$/i;
@@ -52,6 +53,26 @@ async function openServerFileInNewTab(id: string, path: string) {
 }
 
 /**
+ * 오피스 파일을 데스크톱 Word·Excel·PowerPoint 로 바로 엽니다 (Office URI 스킴, lib/open-with-app).
+ * 브라우저가 "Word 를 여시겠습니까?" 를 한 번 묻고, 앱이 없거나 파일이 크면 내려받기로 대신합니다.
+ */
+export async function openOfficeBlob(path: string, blob: Blob, onNotice: (message: string) => void) {
+  if (await openWithOfficeApp(path, blob)) {
+    onNotice(tf('{0} 에서 여는 중입니다 — 브라우저가 묻는 창에서 "열기" 를 눌러 주세요. 편집한 내용은 "다른 이름으로 저장" 으로 남깁니다.', officeAppName(path)));
+    return;
+  }
+  downloadBlob(path, blob);
+  onNotice(path.toLowerCase().endsWith('.pdf') ? t('PDF 를 내려받았습니다.') : t('파일을 내려받았습니다 — Word·Excel·PowerPoint 에서 열어 보세요.'));
+}
+
+function officeAppName(path: string): string {
+  const ext = path.toLowerCase().split('.').pop() ?? '';
+  if (ext === 'xlsx' || ext === 'xls' || ext === 'csv') return 'Excel';
+  if (ext === 'pptx' || ext === 'ppt') return 'PowerPoint';
+  return 'Word';
+}
+
+/**
  * 서버 보관 산출물을 엽니다 — HTML·이미지·PDF 는 새 탭, .docx/.xlsx/.pptx 는 실제 오피스 파일로 변환해 내려받기, CSV 등은 내려받기.
  * 텍스트(.md 등)처럼 화면에서 보여 줘야 하는 파일이면 내용을 돌려주고(false 대신), 호출자가 미리보기를 띄웁니다.
  */
@@ -63,7 +84,7 @@ export async function openServerArtifact(file: Pick<ServerArtifact, 'id' | 'path
   if (!response.ok || !data.file) throw new Error(data.error ?? '파일을 열지 못했습니다.');
   if (isOfficePath(file.path)) {
     const blob = await renderOfficeFile(file.path, data.file.content);
-    if (blob) { downloadBlob(file.path, blob); onNotice(file.path.toLowerCase().endsWith('.pdf') ? t('PDF 를 내려받았습니다. 작업 폴더에도 같은 파일이 있습니다.') : t('파일을 내려받았습니다 — Word·Excel·PowerPoint 에서 열어 보세요. 작업 폴더에도 같은 파일이 있습니다.')); return { opened: true }; }
+    if (blob) { await openOfficeBlob(file.path, blob, onNotice); return { opened: true }; }
   }
   if (DESKTOP_APP_FILE.test(file.path)) {
     downloadBlob(file.path, new Blob([data.file.content], { type: mimeOf(file.path) }));
@@ -172,8 +193,7 @@ export function ProjectFileButtons({ projectId, onNotice, spotlightKey = 0 }: { 
         if (DESKTOP_APP_FILE.test(latest.path)) {
           // 폴더에 저장된 실제 파일(이미 변환된 오피스 파일)을 그대로 내려받습니다.
           const file = await readFile(await folderHandle(latest.folderId), latest.path);
-          downloadBlob(latest.path, new Blob([await file.arrayBuffer()], { type: mimeOf(latest.path) }));
-          onNotice(t('파일을 내려받았습니다 — Word·Excel·PowerPoint 에서 열어 보세요. 작업 폴더에도 같은 파일이 있습니다.'));
+          await openOfficeBlob(latest.path, new Blob([await file.arrayBuffer()], { type: mimeOf(latest.path) }), onNotice);
           return;
         }
         const text = await readLocalFile(await folderHandle(latest.folderId), latest.path);
@@ -208,8 +228,7 @@ export function ProjectFileButtons({ projectId, onNotice, spotlightKey = 0 }: { 
         return;
       }
       if (DESKTOP_APP_FILE.test(file.name)) {
-        downloadBlob(file.name, new Blob([await blob.arrayBuffer()], { type: mimeOf(file.name) }));
-        onNotice(t('파일을 내려받았습니다 — Word·Excel·PowerPoint 에서 열어 보세요.'));
+        await openOfficeBlob(file.name, new Blob([await blob.arrayBuffer()], { type: mimeOf(file.name) }), onNotice);
         return;
       }
       if (blob.size > 1_000_000) throw new Error('편집 가능한 파일 크기는 1MB까지입니다.');

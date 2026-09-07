@@ -66,7 +66,9 @@ export async function proxy(request: NextRequest) {
 
   const { pathname } = request.nextUrl;
   const isApi = pathname.startsWith('/api/');
-  const isPublic = pathname === '/landing' || pathname === '/login' || pathname.startsWith('/api/auth/');
+  const isPublic = pathname === '/landing' || pathname === '/login' || pathname.startsWith('/api/auth/')
+  // Office 앱이 문서를 받아 가는 경로 — 무작위 id 가 곧 열쇠이고 1시간 뒤 사라집니다 (올리는 POST 는 로그인 필요).
+  || (pathname.startsWith('/api/open-files/') && request.method !== 'POST');
 
   const token = request.cookies.get(SESSION_COOKIE)?.value;
   const user = token ? await findSessionUser(getDatabase(), token) : null;

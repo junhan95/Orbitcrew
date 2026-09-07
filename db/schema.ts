@@ -367,3 +367,9 @@ export const taskFiles = sqliteTable('task_files', {
   folderId: text('folder_id').notNull().default(''), path: text('path').notNull(), content: text('content').notNull(),
   createdAt: integer('created_at').notNull(), updatedAt: integer('updated_at').notNull(),
 }, (table) => [uniqueIndex('uq_task_files').on(table.userId, table.taskId, table.path), index('idx_task_files_project').on(table.userId, table.projectId, table.updatedAt)]);
+
+/** 데스크톱 Office 앱으로 바로 열기 위한 임시 파일 (lib/open-files). 무작위 id 로만 접근, 1시간 뒤 정리. */
+export const openFiles = sqliteTable('open_files', {
+  id: text('id').primaryKey(), userId: text('user_id').notNull(), name: text('name').notNull(), mime: text('mime').notNull(),
+  data: text('data').notNull(), createdAt: integer('created_at').notNull(),
+}, (table) => [index('idx_open_files_created').on(table.createdAt)]);
