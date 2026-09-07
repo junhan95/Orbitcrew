@@ -9,11 +9,14 @@ type TaskRow = {
   id: string; title: string; label: string; owner: string; status: string;
   priority: string; accent: string; result: string | null; summary: string | null; blockedReason: string | null; reviewVerdict: string | null; projectId: string | null; parentTaskId: string | null;
   updatedAt?: number;
+  /** 이 카드의 실행 횟수 — 0 이면 위임만 되고 아직 시작되지 않은 카드 (대화 화면이 이어서 시작합니다). */
+  runCount?: number;
 };
 
 // 중요도 높은 카드가 위에 오고, 같은 중요도면 만든 순서를 지킵니다.
-const SELECT_TASKS = `SELECT id, title, label, owner, status, priority, accent, result, summary, blocked_reason AS blockedReason, review_verdict AS reviewVerdict, project_id AS projectId, parent_task_id AS parentTaskId, updated_at AS updatedAt FROM tasks WHERE user_id = ? ORDER BY ${PRIORITY_ORDER_SQL}, created_at ASC`;
-const SELECT_PROJECT_TASKS = `SELECT id, title, label, owner, status, priority, accent, result, summary, blocked_reason AS blockedReason, review_verdict AS reviewVerdict, project_id AS projectId, parent_task_id AS parentTaskId, updated_at AS updatedAt FROM tasks WHERE user_id = ? AND project_id = ? ORDER BY ${PRIORITY_ORDER_SQL}, created_at ASC`;
+const TASK_COLUMNS = 'id, title, label, owner, status, priority, accent, result, summary, blocked_reason AS blockedReason, review_verdict AS reviewVerdict, project_id AS projectId, parent_task_id AS parentTaskId, updated_at AS updatedAt, (SELECT COUNT(*) FROM agent_runs r WHERE r.task_id = tasks.id AND r.user_id = tasks.user_id) AS runCount';
+const SELECT_TASKS = `SELECT ${TASK_COLUMNS} FROM tasks WHERE user_id = ? ORDER BY ${PRIORITY_ORDER_SQL}, created_at ASC`;
+const SELECT_PROJECT_TASKS = `SELECT ${TASK_COLUMNS} FROM tasks WHERE user_id = ? AND project_id = ? ORDER BY ${PRIORITY_ORDER_SQL}, created_at ASC`;
 
 /**
  * 업무 목록.

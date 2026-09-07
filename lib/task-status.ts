@@ -13,6 +13,9 @@ export type TaskStatus = (typeof TASK_STATUSES)[number];
 
 /** 검토 단계(검토 중·검토 완료) 여부 — "결과가 나온 업무" 를 세는 모든 곳이 이걸 씁니다. */
 export const REVIEW_STATUSES: readonly TaskStatus[] = ['검토 중', '검토 완료'];
+
+/** 응답 없이 굳은 실행을 정리(lib/stale-runs)할 때 카드에 남기는 막힘 사유 — 대화 화면은 이 사유의 카드를 한 번 자동으로 다시 맡깁니다. */
+export const STALE_RUN_REASON = '응답 없이 중단되었습니다 — 실행 중 창이 닫혔거나 연결이 끊긴 것으로 보입니다. 다시 실행해 주세요.';
 export function isReviewStatus(value: unknown): boolean {
   return value === '검토 중' || value === '검토 완료';
 }

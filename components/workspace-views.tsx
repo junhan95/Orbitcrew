@@ -21,7 +21,7 @@ import { ReviewActions, ReviewBadge, ReviewComment, isReviewComment } from '@/co
 import { type ApiKeyState, ApiKeyDialog, fetchApiKeyState } from '@/components/api-key-dialog';
 import { CreditsCard } from '@/components/credits-card';
 import { PRIORITIES, type Priority, byPriority, toPriority } from '@/lib/priority';
-import { TASK_STATUSES, isReviewStatus, statusTone, type TaskStatus } from '@/lib/task-status';
+import { TASK_STATUSES, isReviewStatus, statusTone, type TaskStatus, STALE_RUN_REASON } from '@/lib/task-status';
 import { FIELD_TYPES, FIELD_TYPE_LABELS, type FieldType, type ProjectField } from '@/lib/fields';
 import {
   type FolderLinkState, type FsDirHandle, type ProjectFolder,
@@ -60,7 +60,7 @@ type Agent = {
   projectId?: string | null; isManager?: number; roleKey?: string | null;
 };
 type Assignment = { projectId: string; agentId: string };
-type ProjectTask = { id: string; title: string; label: string; owner: string; status: string; priority: string; accent: string; result: string | null; summary?: string | null; description?: string; projectId: string | null; blockedReason?: string | null; reviewVerdict?: string | null; parentTaskId?: string | null; updatedAt?: number };
+type ProjectTask = { id: string; title: string; label: string; owner: string; status: string; priority: string; accent: string; result: string | null; summary?: string | null; description?: string; projectId: string | null; blockedReason?: string | null; reviewVerdict?: string | null; parentTaskId?: string | null; updatedAt?: number; runCount?: number };
 
 /** 접힌 팀원 칸에 보여 줄 요약 — 상태별 건수와 가장 최근에 움직인 카드. */
 function briefOf(tasks: ProjectTask[]) {
@@ -1606,6 +1606,9 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
   useEffect(() => { backgroundListRef.current = background; }, [background]);
   // 카드 기준으로 '작업 중' 을 걷어낸 뒤에도 매니저의 후속 답변이 도착할 수 있어 잠시 더 메시지를 다시 읽습니다.
   const chainWatchUntilRef = useRef(0);
+  // 시작되지 않은 위임 카드를 이어서 시작하는 데 쓰는 최신 실행 함수와, 이미 시도한 카드 id.
+  const startRunRef = useRef<((taskId: string, agent: string, title: string) => Promise<void>) | null>(null);
+  const resumedRef = useRef(new Set<string>());
   const [messageReload, setMessageReload] = useState(0);
   // '대화하기'·업무 목록에서 넘어온 제안 문장. 입력란에 회색(placeholder)으로만 보이고, 사용자가 아무것도 안 적고 보내면 이 문장이 나갑니다.
   const [suggestion, setSuggestion] = useState(initial?.draft ?? '');
@@ -1689,15 +1692,35 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
     setMessageReload((value) => value + 1);
   }, []);
 
+  /**
+   * 위임만 되고 시작되지 않은 카드를 이어서 시작합니다.
+   * 위임 실행은 이 브라우저가 /api/agents/run 을 불러 시작하는데, 그 사이 새로고침·창 닫기·연결 끊김이 있으면 카드가 '대기' 에 남습니다.
+   * 대화 화면으로 돌아와 카드를 다시 읽을 때 (a) 임무에 속한 '대기' 카드 중 실행 기록이 없는 것, (b) 응답 없이 끊겨 정리된 카드(한 번만)를 다시 맡깁니다.
+   * 사용자가 직접 만든 카드(임무 밖)나 다른 사유로 막힌 카드는 건드리지 않습니다.
+   */
+  const resumePendingDelegations = useCallback((tasks: ProjectTask[]) => {
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+    const running = new Set(backgroundListRef.current.map((item) => item.taskId));
+    const pending = tasks.filter((task) => task.parentTaskId && task.status === '대기' && !running.has(task.id) && !resumedRef.current.has(task.id)
+      && ((!task.blockedReason && (task.runCount ?? 0) === 0) || (task.blockedReason === STALE_RUN_REASON && (task.runCount ?? 0) <= 1)));
+    for (const task of pending) {
+      resumedRef.current.add(task.id);
+      void startRunRef.current?.(task.id, task.owner, task.title);
+    }
+    if (pending.length) onNotice(tf('중단됐던 위임 {0}건을 이어서 시작합니다 — {1}', pending.length, Array.from(new Set(pending.map((task) => task.owner))).join(', ')));
+  }, [onNotice]);
+
   const loadBoardTasks = useCallback(() => {
     if (!projectId) return;
     fetch(`/api/tasks?projectId=${encodeURIComponent(projectId)}`)
       .then(async (response) => await response.json() as { tasks?: ProjectTask[] })
-      .then((data) => { const tasks = data.tasks || []; setBoardTasks(tasks); setLoadedFor(projectId); reconcileBackground(tasks); })
+      .then((data) => { const tasks = data.tasks || []; setBoardTasks(tasks); setLoadedFor(projectId); reconcileBackground(tasks); resumePendingDelegations(tasks); })
       .catch(() => { /* 업무 목록은 보조 정보라 실패해도 대화를 막지 않습니다. */ });
-  }, [projectId, reconcileBackground]);
+  }, [projectId, reconcileBackground, resumePendingDelegations]);
 
   useEffect(() => { loadBoardTasks(); }, [loadBoardTasks]);
+  // 다른 화면에 다녀오면 카드를 다시 읽어, 그 사이 멈춘 위임을 이어 갑니다.
+  useEffect(() => { if (visible) loadBoardTasks(); }, [visible, loadBoardTasks]);
   // 상태 점이 실시간에 가깝게 따라가도록, 화면이 보이는 동안 8초마다 업무를 다시 읽습니다.
   useEffect(() => {
     if (!visible || !projectId) return;
@@ -1855,6 +1878,8 @@ function ChatView({ projects, agents, assignments, onNotice, onRefresh, initial,
    * 대화에서 위임된 카드를 백그라운드로 실행합니다. 매니저의 답변은 이미 끝나 대화는 열려 있고,
    * 이 요청이 끝나면 서버가 매니저 대화에 '📥 보고' 를 남기므로 메시지를 다시 읽어 보여 줍니다.
    */
+  // 렌더마다 최신 클로저를 ref 에 둡니다 — 카드 목록을 읽는 쪽(resumePendingDelegations)이 호출합니다.
+  useEffect(() => { startRunRef.current = (taskId, agent, title) => startBackgroundRun(taskId, agent, title); });
   async function startBackgroundRun(taskId: string, agent: string, title: string, chainDepth = 0) {
     const runProjectId = projectId;
     backgroundStartedRef.current.set(taskId, Date.now());

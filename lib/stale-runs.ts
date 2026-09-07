@@ -10,10 +10,11 @@
 import { LEASE_TTL_MS } from './leases';
 import { syncMissionStatus } from './mission';
 import { agentCommentInsert } from './run-loop';
+import { STALE_RUN_REASON } from './task-status';
+export { STALE_RUN_REASON };
 
 /** 시작 뒤 이만큼 지나야 정리 대상 — 임대 TTL 보다 길게 잡아, 막 시작해 아직 임대 갱신 전인 실행을 건드리지 않습니다. */
 export const STALE_RUN_AFTER_MS = LEASE_TTL_MS + 60_000;
-export const STALE_RUN_REASON = '응답 없이 중단되었습니다 — 실행 중 창이 닫혔거나 연결이 끊긴 것으로 보입니다. 다시 실행해 주세요.';
 
 type StaleRow = { runId: string; taskId: string; owner: string; startedAt: number };
 
